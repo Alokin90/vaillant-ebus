@@ -22,6 +22,9 @@ assert SPEC and SPEC.loader
 EBUS = importlib.util.module_from_spec(SPEC)
 sys.modules["vaillant_ebus.backend.ebus_service"] = EBUS
 SPEC.loader.exec_module(EBUS)
+# Intent: fake-server integration tests use a short quiet interval for their single-burst replies.
+# Why: avoid waiting one second after each fake `find` while keeping the production timeout unchanged.
+EBUS.MULTILINE_RESPONSE_TIMEOUT = 0.01
 EbusService = EBUS.EbusService
 
 
@@ -76,6 +79,8 @@ async def test_arotherm_fixture_loads() -> None:
         ("community/f34_issue152_v190_after_cleanup_discovery.yaml", 100),
         ("community/f34_issue152_v192_before_cleanup_discovery.yaml", 100),
         ("community/f34_issue152_v192_after_cleanup_discovery.yaml", 100),
+        ("community/basv3_issue31_2026-09-17_203723_discovery.yaml", 100),
+        ("community/hmux0_issue161_2026-09-28_154109_discovery.yaml", 100),
     ],
 )
 async def test_all_fixtures_load(fixture: str, min_registers: int) -> None:

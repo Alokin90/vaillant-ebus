@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from tests.fake_ebusd import FakeEbusdServer
+from tests.fake_ebusd import FakeEbusdServer, load_find_lines
 
 SERVICE_PATH = Path(__file__).parents[1] / "custom_components/vaillant_ebus/backend/ebus_service.py"
 
@@ -26,6 +26,10 @@ EBUS = importlib.util.module_from_spec(SPEC)
 sys.modules["vaillant_ebus.backend.ebus_service"] = EBUS
 SPEC.loader.exec_module(EBUS)
 
+# Intent: fake-server integration tests use a short quiet interval because each response is sent as one burst.
+# Why: a real one-second silence timeout per fake `find`/`info` call adds no coverage and needlessly slows the suite.
+EBUS.MULTILINE_RESPONSE_TIMEOUT = 0.01
+
 EbusService = EBUS.EbusService
 SendResult = EBUS.SendResult
 WriteResult = EBUS.WriteResult
@@ -37,6 +41,17 @@ def _service() -> EbusService:
     s._reader = AsyncMock(spec=asyncio.StreamReader)
     s._writer = MagicMock(spec=asyncio.StreamWriter)
     return s
+
+
+# Intent: expose the active peer address for per-daemon dump serialization.
+# Why: a connected socket identifies its actual ebusd endpoint more reliably than a configured alias.
+def test_connected_endpoint_uses_tcp_peername() -> None:
+    service = EbusService("ebusd.local", 8888)
+    writer = MagicMock()
+    writer.get_extra_info = MagicMock(return_value=("192.0.2.10", 8888))
+    service._writer = writer
+
+    assert service.connected_endpoint == ("192.0.2.10", 8888)
 
 
 # =============================================================================
@@ -76,6 +91,7 @@ async def test_send_command_timeout() -> None:
     result = await s.send_command("state")
     assert result.data == ""
     assert result.error == "timeout"
+    assert s.is_connected is False
 
 
 # send_command: empty response (connection closed) returns error
@@ -87,6 +103,36 @@ async def test_send_command_connection_closed() -> None:
     result = await s.send_command("state")
     assert result.data == ""
     assert result.error == "connection_closed"
+    assert s.is_connected is False
+
+
+# Intent: socket write/drain failures clear the stale writer and return a transport error.
+# Why: a TCP peer can reset the connection before the next response line is read.
+@pytest.mark.parametrize("operation", ["write", "drain"])
+async def test_send_command_write_or_drain_failure_disconnects(operation: str) -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError()])
+    if operation == "write":
+        s._writer.write = MagicMock(side_effect=ConnectionResetError("peer closed"))
+    else:
+        s._writer.drain = AsyncMock(side_effect=ConnectionResetError("peer closed"))
+
+    result = await s.send_command("state")
+
+    assert result.error.startswith("connection_closed:")
+    assert s.is_connected is False
+
+
+# Intent: a TCP reset during the response read closes the service and reports transport failure.
+# Why: the coordinator must retry instead of treating the missing line as register data.
+async def test_send_command_connection_reset_disconnects() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), ConnectionResetError("reset")])
+
+    result = await s.send_command("state")
+
+    assert result.error == "connection_closed: reset"
+    assert s.is_connected is False
 
 
 # read_register: returns stripped value on success
@@ -117,6 +163,16 @@ async def test_read_register_timeout_returns_none() -> None:
     s._reader.readline = AsyncMock(side_effect=[TimeoutError(), TimeoutError()])
     val = await s.read_register("hmu", "Status")
     assert val is None
+
+
+# Intent: polling reads surface transport timeouts to the coordinator retry path.
+# Why: a timeout is not the same as an unsupported register value.
+async def test_read_register_can_raise_transport_timeout() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), TimeoutError()])
+    with pytest.raises(TimeoutError, match="read timed out"):
+        await s.read_register("hmu", "Status", raise_transport_errors=True)
+    assert s.is_connected is False
 
 
 # read_register: with field parameter
@@ -412,18 +468,296 @@ async def test_find_registers_returns_lines() -> None:
     s._writer.write.assert_called_once_with(b"f -a\n")
 
 
-# find_registers: not connected returns empty list
-# Intent: find_registers on a not-connected service returns an empty list.
-# Why: discovery must degrade to no registers rather than raise.
-async def test_find_registers_not_connected_returns_empty() -> None:
+# find_registers: not connected raises a transport error
+# Intent: find_registers reports an unavailable TCP session instead of an empty discovery graph.
+# Why: coordinator setup must retry when it cannot reach ebusd.
+async def test_find_registers_not_connected_raises() -> None:
     s = EbusService(host="127.0.0.1", port=8888)
+    with pytest.raises(ConnectionError, match="not_connected"):
+        await s.find_registers()
+
+
+# Intent: find_registers raises when ebusd closes its TCP connection during a command.
+# Why: a closed socket must trigger coordinator reconnect rather than look like empty discovery.
+async def test_find_registers_connection_closed_raises() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), b""])
+    with pytest.raises(ConnectionError, match="connection_closed"):
+        await s.find_registers()
+
+
+# Intent: find_registers raises when ebusd times out before the first response line.
+# Why: a stalled TCP command must enter the coordinator retry path.
+async def test_find_registers_timeout_raises() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), TimeoutError()])
+    with pytest.raises(TimeoutError, match="find command timed out"):
+        await s.find_registers()
+
+
+# Intent: find_registers rejects EOF after a partial multi-line response.
+# Why: applying a truncated graph could clear recovery state before discovery is complete.
+async def test_find_registers_trailing_eof_raises() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), b"hmu Status = Standby\n", b""])
+    with pytest.raises(ConnectionError, match="closed while reading f -a"):
+        await s.find_registers()
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"] == "connection_closed"
+
+
+# Intent: a TCP reset after one find line rejects the partial graph response.
+# Why: the final EOF/reset must not be confused with the normal quiet terminator.
+async def test_find_registers_trailing_reset_raises() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(
+        side_effect=[TimeoutError(), b"scan.15 = Vaillant;CTLV2;0514;1104\n", ConnectionResetError("reset")]
+    )
+    with pytest.raises(ConnectionError, match="connection failed while reading f -a"):
+        await s.find_registers()
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"] == "connection_closed: reset"
+
+
+# Intent: empty and error-only find responses remain distinct from TCP failures.
+# Why: discovery can retry or retain repairs without falsely reconnecting a live socket.
+@pytest.mark.parametrize(
+    ("response", "expected_lines"),
+    [(b"\n", []), (b"ERR: command failed\n", ["ERR: command failed"])],
+)
+async def test_find_registers_empty_or_error_only_response_is_not_transport_failure(
+    response: bytes, expected_lines: list[str]
+) -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), response, TimeoutError()])
+    assert await s.find_registers() == expected_lines
+    assert s._command_log[-1]["error"] == "no_usable_lines"
+    assert s.last_find_usable is False
+    assert s.is_connected is True
+
+
+# Intent: reject malformed find rows and disconnect without accepting a partial response.
+# Why: malformed external rows cannot prove a usable graph or safely feed later commands.
+@pytest.mark.parametrize(
+    "malformed_line",
+    ["= value", "circuit = value", "scan.08 = not scan metadata"],
+)
+async def test_find_registers_malformed_rows_fail_closed(malformed_line: str) -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), f"{malformed_line}\n".encode(), TimeoutError()])
+
+    with pytest.raises(ConnectionError, match="malformed find"):
+        await s.find_registers()
+
+    assert s.is_connected is False
+    assert s.last_find_usable is False
+    assert s.debug_info["command_log"][-1]["error"] == "malformed_find_response"
+
+
+# Intent: discard valid-looking prefix rows when the same find response later contains malformed syntax.
+# Why: discovery must never apply a partial graph from a protocol-invalid response.
+async def test_find_registers_malformed_suffix_rejects_partial_response() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(
+        side_effect=[TimeoutError(), b"ctlv2 Status01 = Standby\n", b"= value\n", TimeoutError()]
+    )
+
+    with pytest.raises(ConnectionError, match="malformed find"):
+        await s.find_registers()
+
+    assert s.last_find_usable is False
+    assert s.is_connected is False
+
+
+# Intent: treat unavailable scans as non-usable while retaining valid register placeholders and scans.
+# Why: only parser-accepted bus records may authorize discovery or fallback polling.
+@pytest.mark.parametrize(
+    ("find_line", "expected_usable"),
+    [
+        ("ctlv2 Status01 = (ERR: malformed)", False),
+        ("scan.08 = no data stored", False),
+        ("ctlv2 Status01 = no data stored", True),
+        ("scan.15 = Vaillant;CTLV2;0514;1104", True),
+        ("scan.15 = MF=Vaillant;ID=CTLV2;SW=0514;HW=1104", True),
+    ],
+)
+async def test_find_registers_usable_rows_match_discovery_parsers(find_line: str, expected_usable: bool) -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), f"{find_line}\n".encode(), TimeoutError()])
+
+    assert await s.find_registers() == [find_line]
+
+    assert s.last_find_usable is expected_usable
+    assert s.is_connected is True
+
+
+# Intent: field-shaped keys do not make a find usable bus-register discovery.
+# Why: parsed fields belong to their parent telegram and cannot authorize a standalone read.
+async def test_find_registers_field_only_response_is_unusable() -> None:
+    s = _service()
+    field_line = "hmu Status01.temp = 21.0"
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), f"{field_line}\n".encode(), TimeoutError()])
+
+    assert await s.find_registers() == [field_line]
+
+    assert s.last_find_usable is False
+    assert s.is_connected is True
+
+
+# Intent: a valid row keeps a mixed valid/error find usable without promoting its error row.
+# Why: error placeholders should remain diagnostic and be excluded from active fallback reads.
+async def test_find_registers_mixed_valid_and_error_rows_is_usable() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(
+        side_effect=[
+            TimeoutError(),
+            b"ctlv2 Z1OpMode = auto\n",
+            b"ctlv2 HwcOpMode = (ERR: invalid position)\n",
+            TimeoutError(),
+        ]
+    )
+
     lines = await s.find_registers()
-    assert lines == []
+
+    assert lines == ["ctlv2 Z1OpMode = auto", "ctlv2 HwcOpMode = (ERR: invalid position)"]
+    assert s.last_find_usable is True
+    assert s.is_connected is True
+
+
+# Intent: bound continuously trickling multiline responses by an overall command deadline.
+# Why: the one-second quiet timeout alone allows an unbounded stream to hold the service lock forever.
+@pytest.mark.parametrize("command", ["f -a", "info"])
+async def test_multiline_response_trickling_hits_total_deadline(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(EBUS, "MULTILINE_RESPONSE_TIMEOUT", 0.05)
+    monkeypatch.setattr(EBUS, "MULTILINE_RESPONSE_MAX_DURATION", 0.12)
+    s = _service()
+    response_count = 0
+
+    # Intent: deliver each line before the quiet timeout while exceeding the total response deadline.
+    # Why: only the overall bound can stop an endless but active ebusd response.
+    async def _readline() -> bytes:
+        nonlocal response_count
+        if response_count == 0:
+            response_count += 1
+            raise TimeoutError()  # initial stale-data drain
+        if response_count == 1:
+            response_count += 1
+            return b"ctlv2 Status01 = Standby\n"
+        await asyncio.sleep(0.04)
+        response_count += 1
+        return b"ctlv2 Status01 = Standby\n"
+
+    s._reader.readline = AsyncMock(side_effect=_readline)
+
+    with pytest.raises(TimeoutError, match="total response deadline"):
+        await s._send_lines_locked(command)
+
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"] == "response_timeout"
+    assert s.debug_info["command_log"][-1]["duration_ms"] >= 100
+
+
+# Intent: include the initial response line in the multiline transaction deadline.
+# Why: a delayed first line must not add a second full deadline to a continuously streamed response.
+@pytest.mark.parametrize("command", ["f -a", "info"])
+async def test_multiline_total_deadline_includes_delayed_first_line(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(EBUS, "MULTILINE_RESPONSE_TIMEOUT", 0.05)
+    monkeypatch.setattr(EBUS, "MULTILINE_RESPONSE_MAX_DURATION", 0.1)
+    monkeypatch.setattr(EBUS, "READ_TIMEOUT", 1)
+    s = _service()
+    response_count = 0
+
+    # Intent: delay the first line, then keep subsequent lines inside the quiet interval.
+    # Why: the full command must still stop at one deadline measured from the first read.
+    async def _readline() -> bytes:
+        nonlocal response_count
+        if response_count == 0:
+            response_count += 1
+            raise TimeoutError()
+        if response_count == 1:
+            response_count += 1
+            await asyncio.sleep(0.07)
+            return b"ctlv2 Status01 = Standby\n"
+        await asyncio.sleep(0.04)
+        response_count += 1
+        return b"ctlv2 Status01 = Standby\n"
+
+    s._reader.readline = AsyncMock(side_effect=_readline)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(TimeoutError, match="total response deadline"):
+        await s._send_lines_locked(command)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 0.15
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["duration_ms"] < 150
+
+
+# Intent: reject responses exceeding the multiline line ceiling and discard the socket.
+# Why: line count must bound memory even when every line arrives promptly.
+@pytest.mark.parametrize("command", ["f -a", "info"])
+async def test_multiline_response_line_cap_disconnects(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(EBUS, "MULTILINE_RESPONSE_MAX_LINES", 2)
+    s = _service()
+    s._reader.readline = AsyncMock(
+        side_effect=[
+            TimeoutError(),
+            b"ctlv2 Status01 = Standby\n",
+            b"ctlv2 Status02 = Standby\n",
+            b"ctlv2 Status03 = Standby\n",
+        ]
+    )
+
+    with pytest.raises(ConnectionError, match="line limit"):
+        await s._send_lines_locked(command)
+
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"] == "response_too_large"
+
+
+# Intent: discard a multiline socket after invalid UTF-8 or an overlong protocol line.
+# Why: malformed bytes cannot safely be decoded or followed by another command on that stream.
+@pytest.mark.parametrize(
+    ("stage", "read_error"),
+    [
+        ("first", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")),
+        ("first", ValueError("line too long")),
+        ("later", b"\xff\n"),
+        ("later", ValueError("line too long")),
+    ],
+)
+async def test_find_registers_invalid_line_disconnects(stage: str, read_error: Exception | bytes) -> None:
+    s = _service()
+    responses = [TimeoutError()]
+    if stage == "later":
+        responses.append(b"ctlv2 Status01 = Standby\n")
+    responses.append(read_error)
+    s._reader.readline = AsyncMock(side_effect=responses)
+
+    with pytest.raises(ConnectionError, match="invalid_response_line|invalid response line"):
+        await s.find_registers()
+
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"].startswith("invalid_response_line")
 
 
 # get_info: parse info command response into dict
 # Intent: get_info parses the info banner into key/value pairs.
 # Why: version and signal metadata feed diagnostics and discovery dumps.
+async def test_get_info_propagates_initial_transport_timeout() -> None:
+    s = _service()
+    s._reader.readline = AsyncMock(side_effect=[TimeoutError(), TimeoutError()])
+
+    with pytest.raises(TimeoutError, match="info command timed out"):
+        await s.get_info()
+
+    assert s.is_connected is False
+    assert s.debug_info["command_log"][-1]["error"] == "timeout"
+
+
 async def test_get_info_returns_dict() -> None:
     s = _service()
     s._reader.readline = AsyncMock(
@@ -433,14 +767,16 @@ async def test_get_info_returns_dict() -> None:
     assert info == {"version": "ebusd 1.0", "signal": "acquired"}
 
 
-# get_info: error returns empty dict
-# Intent: get_info returns an empty dict when the transport errors.
-# Why: missing info must not break setup.
-async def test_get_info_error_returns_empty() -> None:
+# Intent: get_info propagates EOF rather than presenting an incomplete banner as success.
+# Why: a closed connection cannot provide trustworthy dump metadata.
+async def test_get_info_connection_closed_raises() -> None:
     s = _service()
     s._reader.readline = AsyncMock(side_effect=[TimeoutError(), b""])
-    info = await s.get_info()
-    assert info == {}
+
+    with pytest.raises(ConnectionError, match="info command failed: connection_closed"):
+        await s.get_info()
+
+    assert s.is_connected is False
 
 
 # get_info: empty response returns empty dict
@@ -590,6 +926,27 @@ async def test_integration_read_register() -> None:
         await s.connect()
         val = await s.read_register("ctlv2", "AdaptHeatCurve")
         assert val == "yes"
+        await s.disconnect()
+
+
+# Integration: the three #32 B509 registers can be read from the resolved hmux0 circuit.
+# Why: validates positive values and the absent-register response through the real fake-ebusd socket path.
+async def test_issue32_b509_registers_read_through_fake_ebusd() -> None:
+    lines = load_find_lines("community/ctlv3_hmux0_vwzio_issue32_2026-09-22_134029_discovery.yaml", after=True)
+    lines.extend(
+        [
+            "hmux0 RunDataElPowerConsumption = 9.0",
+            "hmux0 RunDataCompressorSpeed = 0.0",
+            "hmux0 RunDataBuildingCPumpPower = 0.0",
+        ]
+    )
+    async with FakeEbusdServer(lines) as fake:
+        s = EbusService(host=fake.host, port=fake.port)
+        await s.connect()
+        assert await s.read_register("hmux0", "RunDataElPowerConsumption") == "9.0"
+        assert await s.read_register("hmux0", "RunDataCompressorSpeed") == "0.0"
+        assert await s.read_register("hmux0", "RunDataBuildingCPumpPower") == "0.0"
+        assert await s.read_register("hmux0", "RunStatsFan1Hours") in (None, "")
         await s.disconnect()
 
 

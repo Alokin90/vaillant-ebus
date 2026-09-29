@@ -113,7 +113,8 @@ def load_discovery_dump(name: str) -> dict:
         raise ValueError(f"Not a discovery dump YAML file: {path}")
     import yaml
 
-    return yaml.safe_load(path.read_text())
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    return yaml.load(path.read_text(), Loader=loader)
 
 
 def load_find_lines(name: str, after: bool = False) -> list[str]:
@@ -235,6 +236,8 @@ class FakeEbusdServer:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.stop()
 
+    # Intent: expose only ebusd response records from transcript-backed find fixtures.
+    # Why: shell prompts and command echoes are fixture context, not bytes returned by `find -a`.
     async def _handle_client(
         self,
         reader: asyncio.StreamReader,
@@ -256,7 +259,8 @@ class FakeEbusdServer:
                 # Client reads them line by line with timeout loop
                 if raw in ("f", "find", "f -a", "find -a"):
                     for fline in self._find_lines:
-                        writer.write((fline + "\n").encode())
+                        if "=" in fline or fline.strip().casefold().startswith(("err:", "(err:")):
+                            writer.write((fline + "\n").encode())
                     await writer.drain()
                     # No explicit response — find output IS the response
                     continue
@@ -264,7 +268,7 @@ class FakeEbusdServer:
                 response = self._handle_command(raw)
                 writer.write((response + "\n").encode())
                 await writer.drain()
-        except (TimeoutError, ConnectionError, OSError):
+        except TimeoutError, ConnectionError, OSError:
             pass
         finally:
             writer.close()

@@ -1,5 +1,97 @@
 # Changelog
 
+## 1.10.0 - 2026-09-25
+
+### Fixed
+
+- Stopped actively reading the twelve B524 Hc1/Hc2 state registers through
+  runtime definitions, coordinator fallbacks, and discovery-dump probes.
+  BASS3, BASV3, CTLV3, and the owner's live ebusd logs showed repeated
+  `invalid position` replies. Registers that ebusd discovers itself remain
+  available through normal discovery, and BAS-specific setpoint definitions
+  are unchanged.
+- Retry failed ebusd transport reconnections through the normal setup path and
+  distinguish TCP EOF, timeouts, and write failures from a valid empty `find`
+  result. Rebuild the discovery graph after reconnect, and gate register
+  services and dump probes until a non-empty graph is applied. Keep the
+  `ebusd_unreachable` repair active until that recovery completes, so a
+  temporary connection failure cannot strand the coordinator or leave a stale
+  warning.
+- Prevent cache fallback from restoring a previous value when the current find
+  explicitly reports that register as unavailable.
+- Keep invalid-position B524 placeholders unavailable without creating entities
+  when ebusd reports an error row on an otherwise active controller, and retire
+  cached placeholder entities from earlier versions.
+- Harden discovery dumps and ebusd discovery: require exact `grab` acknowledgements,
+  bound responses, reject malformed discovery rows, and skip active fallback reads
+  for unusable finds, error placeholders, and parsed field keys. An incomplete `info`
+  response now fails the dump instead of saving empty metadata.
+
+### Upgrade
+
+- When upgrading from a version that loaded the pre-#158 Hc1/Hc2 B524 runtime
+  definitions, restart ebusd once after installing the integration. A Home
+  Assistant restart alone does not clear those daemon-memory entries. No ebusd
+  restart is needed when the fixed integration was already in use.
+
+### Added
+
+- Add passive HMUX0 `SW0407/HW0504` telemetry for compressor status, electrical
+  power, compressor speed, building-circuit pump power, and the seven observed
+  refrigerant diagnostics. The runtime definitions decode only gateway telegrams;
+  unsupported B51A map probes no longer trigger active fallback reads on this scan.
+- Add passive VWZIO `PowerConsumptionVwz` from B516/14 for the captured
+  `SW0500/HW0504` station. The integration reports station power, not heater-only
+  power, and does not poll the B511 heater-counter messages.
+- Expose `Hc1RoomTempSwitchOn` as a select with `off`, `modulating`, and
+  `thermostat` options on verified CTLV3 `SW0808/HW8004` hardware. The migration
+  retires the old sensor registry entry and cached description, so the entity
+  ID changes from `sensor.*` to `select.*`; CTLV2 and unverified CTLV3 firmware
+  keep their sensor metadata. A no-data CTLV2 value remains an enabled sensor
+  with an unknown state instead of disabling the existing entity.
+- Added the complete BASV3 discussion #31 capture as a regression fixture for
+  the invalid-position B524 responses.
+- Added the full issue #161 discovery capture as a community regression fixture,
+  including its original find lines, provenance, and unknown-telegram payloads.
+
+### Changed
+
+- Mark daily heating and DHW electricity counters as `total_increasing` and
+  expose a discovered CTLV3 `YieldTotal` as energy in kWh with state class `total`.
+
+### Deferred
+
+- VWZIO B511 `/021801` and `/021802` remain discovery-only on `SW0500/HW0504`;
+  PR #598 verifies their counter meaning on HW5103, but the issue #161 capture
+  does not correlate those counters with a heater run on HW0504.
+
+## 1.9.5 - 2026-09-23
+
+### Added
+
+- **Hardware-gated HMUX0 B509 telemetry from discussion #32.** HMUX0 systems
+  with `SW0302` or `SW0303` and `HW0504` now expose electrical power
+  consumption (`RunDataElPowerConsumption`), compressor speed
+  (`RunDataCompressorSpeed`), and building circulation pump power
+  (`RunDataBuildingCPumpPower`) when the registers are available on the bus.
+- Added the complete CTLV3/HMUX0/VWZIO discovery capture from discussion #32
+  as a community regression fixture, including the unknown and labeled
+  telegram inventory.
+
+### Changed
+
+- `RunDataCompressorSpeed` now reports the upstream B509 unit `rps`.
+
+### Deferred
+
+- B51A yield/current values, runtime counters requiring `hoursum2` or
+  `cntstarts2`, VWZIO HW0504 immersion-heater metrics, CTLV3 modulation and
+  legionella writes, and BAI00 `FlowTempDesired` writes remain hardware- or
+  write-safety gated until matching evidence is available.
+- The remaining Electrical, Environment, and Solar Energy entities from issue
+  #152 are not part of this release; they still need post-purge registry and
+  source-circuit evidence.
+
 ## 1.9.4 - 2026-09-22
 
 ### Fixed
