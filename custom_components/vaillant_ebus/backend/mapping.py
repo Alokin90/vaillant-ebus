@@ -57,6 +57,16 @@ HMUX0_SW0407_PASSIVE_REGISTER_NAMES: frozenset[str] = frozenset(
 HMUX0_SW0407_FALLBACK_NAMES: frozenset[str] = frozenset(
     item.casefold() for item in HMUX0_SW0407_FALLBACK_BLOCKLIST | HMUX0_SW0407_PASSIVE_REGISTER_NAMES
 )
+HMUX0_SW0407_ENVYIELD_REGISTERS: frozenset[str] = frozenset(
+    {
+        "HcEnvYieldTotal",
+        "HcEnvYieldDay",
+        "HcEnvYieldMonth",
+        "HwcEnvYieldTotal",
+        "HwcEnvYieldDay",
+        "HwcEnvYieldMonth",
+    }
+)
 VWZIO_SW0500_FALLBACK_BLOCKLIST: frozenset[str] = frozenset({"PowerConsumptionVwz", "Status01"})
 VWZIO_SW0500_FALLBACK_NAMES: frozenset[str] = frozenset(item.casefold() for item in VWZIO_SW0500_FALLBACK_BLOCKLIST)
 
@@ -675,6 +685,55 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="DHW Switch",
         entity_type="switch",
         writable=True,
+        icon="mdi:water-boiler",
+    ),
+    # HMUX0 SW0407/HW0504 environmental-yield counters (issue #161).
+    "hmu.HcEnvYieldTotal": RegisterMeta(
+        friendly_name="Heating Environmental Energy Total",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
+        icon="mdi:radiator",
+    ),
+    "hmu.HcEnvYieldDay": RegisterMeta(
+        friendly_name="Heating Environmental Energy Today",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
+        icon="mdi:radiator",
+    ),
+    "hmu.HcEnvYieldMonth": RegisterMeta(
+        friendly_name="Heating Environmental Energy Month",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
+        icon="mdi:radiator",
+    ),
+    "hmu.HwcEnvYieldTotal": RegisterMeta(
+        friendly_name="DHW Environmental Energy Total",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
+        icon="mdi:water-boiler",
+    ),
+    "hmu.HwcEnvYieldDay": RegisterMeta(
+        friendly_name="DHW Environmental Energy Today",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
+        icon="mdi:water-boiler",
+    ),
+    "hmu.HwcEnvYieldMonth": RegisterMeta(
+        friendly_name="DHW Environmental Energy Month",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        fallback_read=False,
         icon="mdi:water-boiler",
     ),
     # Runtime-defined b516 cooling-energy registers (issue #50). The bus
