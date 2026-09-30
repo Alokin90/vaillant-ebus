@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.1 - 2026-09-30
+
+### Added
+
+- Add heating and DHW environmental-yield sensors for HMUX0 `SW0407/HW0504`.
+  The six B516 counters are exposed in Wh with energy statistics metadata.
+  Other HMUX0 firmware variants are not actively probed for these registers.
+
 ## 1.10.0 - 2026-09-25
 
 ### Fixed

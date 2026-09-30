@@ -26,6 +26,7 @@ from .backend.discovery_service import HIDDEN_DEVICE_KEYWORDS, DiscoveryService,
 from .backend.ebus_service import EBUSD_STATUS_SUFFIXES, EbusService
 from .backend.entity_factory import EntityDescription, EntityFactoryService
 from .backend.mapping import (
+    HMUX0_SW0407_ENVYIELD_REGISTERS,
     HMUX0_SW0407_FALLBACK_NAMES,
     REGISTER_MAP,
     VWZIO_SW0500_FALLBACK_NAMES,
@@ -1363,6 +1364,31 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         ]
 
         heat_pump = self._graph.heat_pump_result().node if self._graph is not None else None
+        hmux0_sw0407_owner = hmux0_sw0407_circuit(self._graph)
+        if hmux0_sw0407_owner is not None:
+            circuit = hmux0_sw0407_owner
+            defines.extend(
+                [
+                    f"r,{circuit},HcEnvYieldTotal,HcEnvYieldTotal,31,08,B516"
+                    ",1000ffff02030000,value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 heating environmental yield total",
+                    f"r,{circuit},HcEnvYieldDay,HcEnvYieldDay,31,08,B516"
+                    f",1001ffff0203{date_bytes},value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 heating environmental yield today",
+                    f"r,{circuit},HcEnvYieldMonth,HcEnvYieldMonth,31,08,B516"
+                    f",1002ffff0203{date_bytes},value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 heating environmental yield this month",
+                    f"r,{circuit},HwcEnvYieldTotal,HwcEnvYieldTotal,31,08,B516"
+                    ",1000ffff02040000,value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 DHW environmental yield total",
+                    f"r,{circuit},HwcEnvYieldDay,HwcEnvYieldDay,31,08,B516"
+                    f",1001ffff0204{date_bytes},value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 DHW environmental yield today",
+                    f"r,{circuit},HwcEnvYieldMonth,HwcEnvYieldMonth,31,08,B516"
+                    f",1002ffff0204{date_bytes},value,,IGN:7,,,,value,,EXP,,Wh"
+                    ",HMUX0 DHW environmental yield this month",
+                ]
+            )
         is_hmux0_0303_0504 = bool(
             heat_pump
             and heat_pump.scan_type.upper() == "HMUX0"
@@ -1375,7 +1401,6 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             and heat_pump.scan_sw in {"0302", "0303"}
             and heat_pump.scan_hw == "0504"
         )
-        hmux0_sw0407_owner = hmux0_sw0407_circuit(self._graph)
         vwzio_circuit = vwzio_sw0500_circuit(self._graph)
         vwzio = next(
             (
@@ -1411,6 +1436,12 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         def _resolve_definition_circuit(definition: str) -> str | None:
             parts = definition.split(",", 3)
             if len(parts) < 3 or not self._graph:
+                return definition
+            if (
+                hmux0_sw0407_owner
+                and parts[1].casefold() == hmux0_sw0407_owner.casefold()
+                and parts[2] in HMUX0_SW0407_ENVYIELD_REGISTERS
+            ):
                 return definition
             resolution = (
                 self._graph.heating_controller_result()

@@ -1,0 +1,51 @@
+metadata:
+  evidence_class: confirmed
+  source: https://github.com/MarkBovee/vaillant-ebus/pull/159#issuecomment-5913463544
+  evidence_type: raw ebusd forced-read log excerpt
+  captured_at: "2026-09-30"
+  ebusd_version: "26.1.26.1"
+  adapter: "10.1.50.46, TCP, enhanced, firmware 1.1[6911].1[6911]"
+  scan:
+    address: "08"
+    manufacturer: Vaillant
+    id: HMUX0
+    sw: "0407"
+    hw: "0504"
+  scan_context_fixture: community/hmux0_issue161_2026-09-28_154109_discovery.yaml
+registers:
+  - name: HcEnvYieldTotal
+    request_data: "1000ffff02030000"
+    displayed_value: "204150"
+    log_lines:
+      - "2026-09-30 19:02:18.135 [update notice] sent read hmux0 HcEnvYieldTotal: 204150"
+      - "2026-09-30 19:02:18.135 [bus notice] >3108b516081000ffff020300000b<000b00000102033e35625d474872>00"
+  - name: HcEnvYieldDay
+    request_data: "1001ffff02033e35"
+    displayed_value: "5534.55"
+    log_lines:
+      - "2026-09-30 19:01:10.807 [update notice] sent read hmux0 HcEnvYieldDay: 5534.55"
+      - "2026-09-30 19:01:10.807 [bus notice] >3108b516081001ffff02033e35e0<000b01000102033e356df4ac4565>00"
+  - name: HcEnvYieldMonth
+    request_data: "1002ffff02033e35"
+    displayed_value: "204196"
+    log_lines:
+      - "2026-09-30 19:01:12.041 [update notice] sent read hmux0 HcEnvYieldMonth: 204196"
+      - "2026-09-30 19:01:12.041 [bus notice] >3108b516081002ffff02033e357c<000b02000102033235e368474857>00"
+  - name: HwcEnvYieldTotal
+    request_data: "1000ffff02040000"
+    displayed_value: "98710.3"
+    log_lines:
+      - "2026-09-30 19:01:13.265 [update notice] sent read hmux0 HwcEnvYieldTotal: 98710.3"
+      - "2026-09-30 19:01:13.265 [bus notice] >3108b516081000ffff0204000069<000b00000402043e3523cbc04720>00"
+  - name: HwcEnvYieldDay
+    request_data: "1001ffff02043e35"
+    displayed_value: "7684.28"
+    log_lines:
+      - "2026-09-30 19:01:14.495 [update notice] sent read hmux0 HwcEnvYieldDay: 7684.28"
+      - "2026-09-30 19:01:14.495 [bus notice] >3108b516081001ffff02043e3582<000b01000402043e353b22f04587>00"
+  - name: HwcEnvYieldMonth
+    request_data: "1002ffff02043e35"
+    displayed_value: "98789.3"
+    log_lines:
+      - "2026-09-30 19:01:15.880 [update notice] sent read hmux0 HwcEnvYieldMonth: 98789.3"
+      - "2026-09-30 19:01:15.880 [bus notice] >3108b516081002ffff02043e351e<000b02000402043235a4f2c047b2>00"

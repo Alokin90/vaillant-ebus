@@ -34,7 +34,6 @@ HC_STATE_REGISTER_NAMES = (
     "Hc2PumpHours",
     "Hc2PumpStarts",
 )
-
 for name in ("vaillant_ebus", "vaillant_ebus.backend"):
     pkg = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(name, None))
     pkg.__path__ = [str(COMPONENT_PATH)] if name == "vaillant_ebus" else [str(BACKEND_PATH)]
@@ -701,8 +700,8 @@ async def test_issue161_hmux0_sw0407_runtime_definitions_are_passive_and_scan_ga
         assert not any(",PowerConsumptionVwz," in definition for definition in other_definitions)
 
 
-# Intent: define SW0407 passive layouts from their unique scan despite an ambiguous role resolution.
-# Why: a second discovered heat pump must not crash setup or redirect passive frames to the wrong circuit.
+# Intent: define SW0407 layouts from their unique scan despite ambiguous heat-pump role resolution.
+# Why: a second heat pump must not suppress target registers or redirect definitions to the wrong circuit.
 async def test_issue161_sw0407_passive_definitions_survive_other_heat_pump_node() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         lines = load_find_lines("community/hmux0_issue161_2026-09-28_154109_discovery.yaml", after=True)
@@ -726,6 +725,8 @@ async def test_issue161_sw0407_passive_definitions_survive_other_heat_pump_node(
         definitions = [call.args[0] for call in coordinator.ebus.define_register.await_args_list]
         assert any(definition.startswith("u,hmux0,RunDataStatuscode,") for definition in definitions)
         assert not any(definition.startswith("u,hmu,") for definition in definitions)
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert any(definition.startswith(f"r,hmux0,{name},") for definition in definitions)
 
 
 # Intent: issue #32's SW0302 map retains its existing active B509 path and gains no SW0407-only passive layouts.
@@ -747,13 +748,17 @@ async def test_issue161_passive_hmux0_definitions_do_not_generalize_to_sw0302() 
         assert graph.nodes["hmux0"].scan_sw == "0302"
         assert any(",B509,055402005b0d," in definition for definition in definitions)
         assert not any(definition.startswith("u,hmux0,") for definition in definitions)
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert not any(f",{name}," in definition for definition in definitions)
         coordinator.ebus.read_register = AsyncMock(return_value=None)
         coordinator._last_find_keys = set(graph.raw_registers) | set(graph.placeholder_registers)
-        await coordinator._fallback_read(include_placeholders=True)
+        await coordinator._fallback_read(include_placeholders=True, include_energy=True)
         assert any(
             call.args == ("hmux0", "RunDataElPowerConsumption")
             for call in coordinator.ebus.read_register.await_args_list
         )
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert ("hmux0", name) not in [call.args for call in coordinator.ebus.read_register.await_args_list]
         for register in ("HcElecConsDay", "HwcElecConsDay"):
             assert ("hmux0", register) in [call.args for call in coordinator.ebus.read_register.await_args_list]
 
@@ -769,8 +774,12 @@ async def test_issue161_passive_hmux0_definitions_do_not_generalize_to_sw0302() 
         await sw0303._define_custom_registers()
         assert sw0303_graph.nodes["hmux0"].scan_sw == "0303"
         assert any(",B509,055402005b0d," in call.args[0] for call in sw0303.ebus.define_register.await_args_list)
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert not any(f",{name}," in call.args[0] for call in sw0303.ebus.define_register.await_args_list)
         sw0303._last_find_keys = set(sw0303_graph.raw_registers) | set(sw0303_graph.placeholder_registers)
         await sw0303._fallback_read(include_energy=True)
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert ("hmux0", name) not in [call.args for call in sw0303.ebus.read_register.await_args_list]
         for register in ("HcElecConsDay", "HwcElecConsDay"):
             assert ("hmux0", register) in [call.args for call in sw0303.ebus.read_register.await_args_list]
 
@@ -789,6 +798,14 @@ async def test_issue161_hmux0_sw0407_fallback_skips_unverified_b51a_and_passive_
         coordinator._graph = graph
 
         await coordinator._define_custom_registers()
+        definitions = [call.args[0] for call in coordinator.ebus.define_register.await_args_list]
+        yield_definitions = [
+            definition
+            for definition in definitions
+            if any(f",{name}," in definition for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS)
+        ]
+        assert len(yield_definitions) == len(MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS)
+        assert all(definition.startswith("r,hmux0,") for definition in yield_definitions)
         coordinator._last_find_keys = set()
         await coordinator._fallback_read(include_placeholders=True, include_energy=True)
 
@@ -844,6 +861,8 @@ async def test_issue161_hmux0_sw0407_fallback_skips_unverified_b51a_and_passive_
         assert not blocked_reads, blocked_reads
         for register in ("HcElecConsDay", "HwcElecConsDay"):
             assert ("hmux0", register) in [call.args for call in read_calls]
+        for register in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert ("hmux0", register) in [call.args for call in read_calls]
 
 
 # Intent: failed passive definitions cannot make the integration actively probe their telegrams as a fallback.
@@ -866,6 +885,8 @@ async def test_issue161_failed_passive_definitions_still_skip_active_fallback() 
         await coordinator._fallback_read(include_placeholders=True, include_energy=True)
 
         calls = [call.args for call in coordinator.ebus.read_register.await_args_list]
+        for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
+            assert ("hmux0", name) not in calls
         for name in (
             "RunDataStatuscode",
             "RunDataCompressorSpeed",

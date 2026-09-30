@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from tests.fake_ebusd import load_discovery_dump, load_find_lines
@@ -308,6 +310,59 @@ def test_issue161_energy_metadata_and_absent_yield_path() -> None:
     )
     assert "ctlv3.YieldTotal" in absent_graph.placeholder_registers
     assert "ctlv3.YieldTotal.value" not in {entity.key for entity in EntityFactoryService().generate(absent_graph)}
+
+
+# Intent: issue #161's raw HMUX0 frames decode all six B516 environmental-yield values.
+# Why: the fixture combines the exact-scan full dump with unmodified PR frames and guards their message layout.
+def test_issue161_envyield_raw_frames_decode_and_absent_path() -> None:
+    evidence = load_discovery_dump("community/hmux0_issue161_envyield_b516_2026-09-30.yaml")
+    context_name = evidence["metadata"]["scan_context_fixture"]
+    context = load_discovery_dump(context_name)
+    scan = evidence["metadata"]["scan"]
+    scan_config = context["metadata"]["ebusd_info"]["loaded_configs"][scan["address"]]
+    assert scan_config["scanned"] == f"MF={scan['manufacturer']};ID={scan['id']};SW={scan['sw']};HW={scan['hw']}"
+    assert evidence["metadata"]["ebusd_version"] == "26.1.26.1"
+    assert len(evidence["registers"]) == 6
+
+    register_lines = []
+    values = {}
+    for item in evidence["registers"]:
+        assert len(item["log_lines"]) == 2
+        assert f"sent read hmux0 {item['name']}: {item['displayed_value']}" in item["log_lines"][0]
+        bus_line = item["log_lines"][1]
+        wire_request, wire_response = (
+            bus_line.split(">", 1)[1].split("<", 1)[0],
+            bus_line.split("<", 1)[1].split(">", 1)[0],
+        )
+        assert wire_request[10:-2] == item["request_data"]
+        response = bytes.fromhex(wire_response)
+        assert response[0] == 0
+        assert response[1] == len(response[2:-1])
+        decoded_value = struct.unpack_from("<f", response, 2 + 7)[0]
+        displayed_value = float(item["displayed_value"])
+        decimal_places = len(item["displayed_value"].partition(".")[2])
+        assert round(decoded_value, decimal_places) == displayed_value
+        values[item["name"]] = decoded_value
+        register_lines.append(f"hmux0 {item['name']} = {decoded_value}")
+
+    assert "02033235" in evidence["registers"][2]["log_lines"][1]
+    assert "02033e35" in evidence["registers"][2]["log_lines"][1]
+
+    graph = DiscoveryService.build_device_graph(load_find_lines(context_name, after=True) + register_lines)
+    entities = {entity.key: entity for entity in EntityFactoryService().generate(graph)}
+    for name in values:
+        meta = entities[f"hmux0.{name}.value"].meta
+        assert meta.device_class == "energy"
+        assert meta.unit == "Wh"
+        assert meta.state_class == "total_increasing"
+
+    for unavailable in ("no data stored", "(ERR: element not found)"):
+        absent_graph = DiscoveryService.build_device_graph(
+            load_find_lines(context_name, after=True)
+            + [f"hmux0 {item['name']} = {unavailable}" for item in evidence["registers"]]
+        )
+        absent_entities = {entity.key for entity in EntityFactoryService().generate(absent_graph)}
+        assert not any(f"hmux0.{item['name']}.value" in absent_entities for item in evidence["registers"])
 
 
 # Intent: issue #161 retains scanned VWZIO identity even before a matching CSV exposes registers.
