@@ -134,12 +134,21 @@ export_discovery_dump:
   name: Export Discovery Dump
   description: >-
     Export discovered registers and the full REGISTER_MAP to YAML for
-    troubleshooting. Exports to the same ebusd endpoint are serialized, but
-    external `ebusctl grab` clients are not. Do not run one during this export.
+    troubleshooting. Current ebusd versions grab globally at startup. When a
+    grab is already active, the service compares before/after message counts
+    without stopping the shared capture. Results are deduplicated to the latest
+    payload per message key; identical visible rows are coalesced by summing
+    counts. ebusd exposes no capture epoch, so an external
+    `grab`/`grab stop` command or daemon restart during export can make counts
+    ambiguous; do not run those commands or restart ebusd until the service
+    finishes. If the connection drops before ebusd confirms `grab started`, the
+    service will not send an unowned stop command, so ebusd may keep grabbing.
+    Run only one export per ebusd endpoint at a time, including across separate
+    Home Assistant instances.
   fields:
     grab_duration:
       name: Grab Duration
-      description: Capture raw eBUS traffic for N seconds before final dump (0 = disable)
+      description: Capture raw eBUS traffic for N seconds before final dump (0 = disable; auto-grab sessions use count deltas)
       advanced: true
       default: 0
       selector:
