@@ -1,6 +1,6 @@
 # Release 1.10.2 Plan
 
-Status: **Merge gate passed on c05b391; post-merge CI and tag/release checks pending**
+Status: **Released as v1.10.2; merge, tag workflow, and published artifact verified**
 Date: 2026-10-02
 Parent release: `v1.10.1`
 Execution branch: `release/1.10.2`
@@ -315,8 +315,12 @@ mandatory; deploy with `scripts/deploy.sh --restart` and exercise through HA-MCP
 | HA_SMOKE | PASS | Final executable integration/service files deployed; zero/one-second exports parsed, continued capture reported count_delta and 1.00191 s, and read-only `grab result all` returned 8,213 lines. Later repository-only edits were limited to plan bookkeeping and test comments; no deployed file changed. |
 | REVIEW | PASS | Final independent standard-tier review confirmed all prior findings closed, including direct Intent/Why comments, against the final capture paths and docs |
 | AUDIT | PASS | Final independent deep audit found no remaining counterexample across over-limit lines, count bounds, ownership, external concurrency, cancellation, fallback, and graph guard |
-| PR_CI | PASS | PR #166 checks `ci`, `validate`, and `validate-hacs` passed on current head `c05b391a17fb531ad498b0ceb224d711744dc9d3`; `release` was correctly skipped for a branch PR |
-| RELEASE_GATE | PASS for merge | Independent gate approved merge of PR #166 at `c05b391a17fb531ad498b0ceb224d711744dc9d3`; confirm merge SHA and main-branch checks before tagging, then verify the published release artifact |
+| PR_CI | PASS | PR #166 checks `ci`, `validate`, and `validate-hacs` passed on head `95815cde2f342ec4859320d84bc77477cc6da79e`; release was skipped for the branch PR |
+| MERGE | PASS | PR #166 merged to `main` at `44f11a9083cd83da04139b690f0d117d96bc23b6` |
+| MAIN_CI | PASS | `ci`, `validate`, and `validate-hacs` all passed on merge commit `44f11a9083cd83da04139b690f0d117d96bc23b6` |
+| TAG | PASS | Annotated tag `v1.10.2` points to merge commit `44f11a9083cd83da04139b690f0d117d96bc23b6` |
+| RELEASE_ARTIFACT | PASS | Tag workflow `36990530212` succeeded and published `vaillant_ebus.zip` at https://github.com/MarkBovee/vaillant-ebus/releases/tag/v1.10.2; archive has manifest version `1.10.2` and SHA-256 `d73ada6d87d8fbbbb5f0a95719c7f0d3592c63bdb7d812549720052249e0c8d7` |
+| RELEASE_GATE | PASS | Independent gates approved PR, merge, and tag sequence; published artifact inspected and version/content verified |
 
 ## Audit budget
 
