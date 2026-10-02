@@ -1,6 +1,6 @@
 # Release 1.10.2 Plan
 
-Status: **RELEASE_GATE passed for PR; remote CI and merge/release gates pending**
+Status: **PR CI passed on c89656e; documentation follow-up and merge/release gates pending**
 Date: 2026-10-02
 Parent release: `v1.10.1`
 Execution branch: `release/1.10.2`
@@ -315,7 +315,8 @@ mandatory; deploy with `scripts/deploy.sh --restart` and exercise through HA-MCP
 | HA_SMOKE | PASS | Final executable integration/service files deployed; zero/one-second exports parsed, continued capture reported count_delta and 1.00191 s, and read-only `grab result all` returned 8,213 lines. Later repository-only edits were limited to plan bookkeeping and test comments; no deployed file changed. |
 | REVIEW | PASS | Final independent standard-tier review confirmed all prior findings closed, including direct Intent/Why comments, against the final capture paths and docs |
 | AUDIT | PASS | Final independent deep audit found no remaining counterexample across over-limit lines, count bounds, ownership, external concurrency, cancellation, fallback, and graph guard |
-| RELEASE_GATE | PASS for PR | Independent gate confirmed exact diff, inbox closure, and prior evidence; merge/tag/release remain blocked on remote CI, merge approval, and post-merge artifact verification |
+| PR_CI | PASS | PR #166 checks `ci`, `validate`, and `validate-hacs` passed on `c89656e64c5e5d264fcc3184348eaa618d93b1a2`; the `release` job was correctly skipped for a branch PR |
+| RELEASE_GATE | PASS for PR | Independent gate approved the exact staged diff for PR; merge/tag/release remain blocked on final head CI, merge approval, and post-merge artifact verification |
 
 ## Audit budget
 
