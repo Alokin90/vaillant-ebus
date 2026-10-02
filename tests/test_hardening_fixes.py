@@ -647,6 +647,23 @@ async def test_grab_cmd_fails_when_response_exceeds_line_ceiling(monkeypatch: py
     writer.wait_closed.assert_awaited_once()
 
 
+# Intent: classify a single over-limit TCP line as an incomplete capture response.
+# Why: StreamReader.readline can raise ValueError before the total-line ceiling is reached.
+async def test_grab_cmd_converts_oversized_single_line_to_capture_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = MagicMock()
+    reader.readline = AsyncMock(side_effect=ValueError("line exceeds stream limit"))
+    writer = MagicMock()
+    writer.drain = AsyncMock()
+    writer.wait_closed = AsyncMock()
+    monkeypatch.setattr(DUMP.asyncio, "open_connection", AsyncMock(return_value=(reader, writer)))
+
+    with pytest.raises(HomeAssistantError, match="response line exceeded the stream limit"):
+        await DUMP._grab_cmd("127.0.0.1", 8888, "grab result all")
+
+    writer.close.assert_called_once()
+    writer.wait_closed.assert_awaited_once()
+
+
 # Intent: treat EOF before the ebusd response terminator as incomplete data.
 # Why: TCP closure is not the protocol's blank-line success terminator.
 async def test_grab_cmd_fails_on_eof_before_response_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -750,7 +767,7 @@ async def test_async_grab_fails_when_stop_command_fails(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(DUMP, "_grab_cmd", _fail_stop)
 
-    with pytest.raises(HomeAssistantError, match="Could not stop ebusd traffic capture"):
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="could not stop exporter-started"):
         await DUMP.async_grab("127.0.0.1", 8888, 0)
 
 
@@ -865,7 +882,8 @@ async def test_async_grab_accepts_empty_or_valid_telegram_result(
 
     result = await DUMP.async_grab("127.0.0.1", 8888, 0)
 
-    assert result == ["[grab] grab started", *result_lines, "[grab stop] grab stopped"]
+    assert result.lines == ("[grab] grab started", *result_lines, "[grab stop] grab stopped")
+    assert result.status == "captured"
 
 
 # Intent: abort when ebusd never acknowledges that raw capture started.
@@ -887,13 +905,596 @@ async def test_async_grab_rejects_missing_start_acknowledgement(monkeypatch: pyt
     assert commands == ["grab"]
 
 
-# Intent: preserve a capture transport exception after issuing grab stop.
-# Why: result retrieval failure must not leave the bus grab active or return partial success.
+# Intent: derive only interval telegram counts when ebusd's global grab is already active.
+# Why: current ebusd starts a daemon-wide grab automatically and must not be stopped by the export.
+async def test_async_grab_diffs_existing_capture_without_stopping_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    results = iter(
+        [
+            [
+                "f108b509055402000d0a / 0802010d0a00000000 = 5: hmu RunDataCompressorSpeed",
+                "10feb51603016019 / 00 = 7",
+            ],
+            [
+                "f108b509055402000d0a / 0802010d0a00000001 = 8: hmu RunDataCompressorSpeed",
+                "10feb51603016019 / 00 = 9",
+                "10feb51603026019 / 00 = 2",
+            ],
+        ]
+    )
+
+    # Intent: provide cumulative ebusd snapshots around the requested interval.
+    # Why: count deltas isolate new keys without mutating the global capture buffer.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        commands.append(command)
+        if command == "grab":
+            return ["grab continued"]
+        if command == "grab result all":
+            return next(results)
+        raise AssertionError(f"unexpected ebusd command: {command}")
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+
+    capture = await DUMP.async_grab("127.0.0.1", 8888, 1)
+
+    assert capture.status == "continued"
+    assert capture.lines == (
+        "[grab] grab continued",
+        "f108b509055402000d0a / 0802010d0a00000001 = 3: hmu RunDataCompressorSpeed",
+        "10feb51603016019 / 00 = 2",
+        "10feb51603026019 / 00 = 2",
+    )
+    assert capture.duration >= 0.9
+    assert commands == ["grab", "grab result all", "grab result all"]
+
+
+# Intent: reject request or source-key changes that make a cumulative delta ambiguous.
+# Why: known message labels and unknown raw IDs must not be merged under guessed keys.
+@pytest.mark.parametrize(
+    ("baseline", "final", "expected_commands"),
+    [
+        (
+            [
+                "f108b5240100 / 00 = 2: ctlv3 Z1OpMode",
+                "f108b5240101 / 01 = 3: ctlv3 Z1OpMode",
+            ],
+            [
+                "f108b5240100 / 00 = 4: ctlv3 Z1OpMode",
+                "f108b5240102 / 02 = 2: ctlv3 Z1OpMode",
+            ],
+            ["grab", "grab result all", "grab result all"],
+        ),
+        (
+            ["1008b5110100 / 09abcdef0000000000 = 2"],
+            ["f108b5110100 / 09abcdef0000000000 = 3"],
+            ["grab", "grab result all", "grab result all"],
+        ),
+        (
+            ["1008b5240100 / 00 = 2: ctlv3 Z1OpMode"],
+            ["f108b5240100 / 00 = 3: ctlv3 Z1OpMode"],
+            ["grab", "grab result all", "grab result all"],
+        ),
+        (
+            ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"],
+            [],
+            ["grab", "grab result all", "grab result all"],
+        ),
+        (
+            ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode"],
+            ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"],
+            ["grab", "grab result all", "grab result all"],
+        ),
+        (
+            [
+                "f108b5240100 / 00 = 2: ctlv3 Z1OpMode",
+                "f108b5240100 / 01 = 3: ctlv3 Z1OpMode",
+            ],
+            ["f108b5240100 / 01 = 4: ctlv3 Z1OpMode"],
+            ["grab", "grab result all", "grab result all"],
+        ),
+    ],
+)
+async def test_async_grab_fails_closed_when_interval_keys_are_ambiguous(
+    baseline: list[str],
+    final: list[str],
+    expected_commands: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter([baseline, final])
+    commands: list[str] = []
+
+    # Intent: provide an unsafe before/after pair while preserving the global grab.
+    # Why: identity changes, missing baseline rows, and counter resets cannot yield a reliable delta.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        commands.append(command)
+        return ["grab continued"] if command == "grab" else next(results)
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError):
+        await DUMP.async_grab("127.0.0.1", 8888, 0)
+
+    assert commands == expected_commands
+
+
+# Intent: report malformed and incomplete grab snapshots as safe register-only fallbacks.
+# Why: optional raw capture failures must not discard the valid register snapshot already collected.
+@pytest.mark.parametrize("failure_stage", ["baseline", "final", "oversized"])
+async def test_async_grab_converts_snapshot_failures_to_interval_unavailable(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    result_calls = 0
+
+    # Intent: simulate malformed rows, transport loss, and an oversized response.
+    # Why: every unusable continued snapshot should be classified as unsafe.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        nonlocal result_calls
+        commands.append(command)
+        if command == "grab":
+            return ["grab continued"]
+        result_calls += 1
+        if failure_stage == "baseline" and result_calls == 1:
+            return ["not an ebusd telegram"]
+        if failure_stage == "final" and result_calls == 2:
+            return ["not an ebusd telegram"]
+        if failure_stage == "oversized" and result_calls == 1:
+            raise HomeAssistantError("ebusd grab result all response exceeded the line limit")
+        return ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"]
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError):
+        await DUMP.async_grab("127.0.0.1", 8888, 0)
+
+    expected = (
+        ["grab", "grab result all"]
+        if failure_stage in {"baseline", "oversized"}
+        else ["grab", "grab result all", "grab result all"]
+    )
+    assert commands == expected
+
+
+# Intent: include baseline latency but exclude final-result latency from the reported interval.
+# Why: metadata should track the capture interval, not time spent serializing snapshots.
+async def test_async_grab_duration_covers_baseline_and_excludes_final_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    result_calls = 0
+
+    # Intent: delay both snapshot responses around the measured interval.
+    # Why: baseline latency belongs to capture duration, while final-query latency does not.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        nonlocal result_calls
+        if command == "grab":
+            return ["grab continued"]
+        if command == "grab result all":
+            result_calls += 1
+            await asyncio.sleep(0.4)
+            return ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"]
+        raise AssertionError(f"unexpected ebusd command: {command}")
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+    wall_started = asyncio.get_running_loop().time()
+    capture = await DUMP.async_grab("127.0.0.1", 8888, 1)
+    wall_duration = asyncio.get_running_loop().time() - wall_started
+
+    assert result_calls == 2
+    assert capture.duration >= 0.9
+    assert capture.duration < 1.2
+    assert wall_duration >= 1.3
+    assert wall_duration < 1.8
+
+
+# Intent: start the owned-session timer as soon as ebusd sends its start ACK.
+# Why: socket terminator latency must not shorten the requested capture interval.
+async def test_owned_grab_duration_starts_at_ack_before_response_terminator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Intent: delay the owned start response after its acknowledgement callback.
+    # Why: the interval must begin when ebusd sends the ACK, not at the blank terminator.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        if command == "grab":
+            assert on_grab_started is not None
+            on_grab_started()
+            await asyncio.sleep(0.3)
+            return ["grab started"]
+        if command == "grab result all":
+            return ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"]
+        if command == "grab stop":
+            return ["grab stopped"]
+        raise AssertionError(f"unexpected ebusd command: {command}")
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+    wall_started = asyncio.get_running_loop().time()
+    capture = await DUMP.async_grab("127.0.0.1", 8888, 1)
+    wall_duration = asyncio.get_running_loop().time() - wall_started
+
+    assert capture.status == "captured"
+    assert capture.duration >= 0.9
+    assert capture.duration < 1.2
+    assert wall_duration < 1.2
+
+
+# Intent: pair one-row broadcast families by effective ID despite request-length variation.
+# Why: ebusd's broadcast key uses only the first master-data byte, not raw NN.
+def test_unknown_broadcast_length_change_uses_effective_id() -> None:
+    baseline = DUMP._validate_grab_result_response(["10feb51603016019 / 00 = 5"])
+    final = DUMP._validate_grab_result_response(["10feb5160401602021 / 00 = 8"])
+
+    assert DUMP._grab_result_delta(baseline, final) == ["10feb5160401602021 / 00 = 3"]
+
+
+# Intent: pair one-row slave families by the effective four-byte ID despite trailing data changes.
+# Why: ebusd's generic slave-message key ignores master bytes after the first four ID bytes.
+def test_unknown_slave_length_change_uses_effective_id() -> None:
+    baseline = DUMP._validate_grab_result_response(["1008b511050102030405 / 00 = 4"])
+    final = DUMP._validate_grab_result_response(["1008b51106010203040607 / 01 = 7"])
+
+    assert DUMP._grab_result_delta(baseline, final) == ["1008b51106010203040607 / 01 = 3"]
+
+
+# Intent: pair one-row known message families when their request payload changes.
+# Why: the retained global key persists while its latest request/response payload is replaced.
+def test_known_single_row_family_uses_count_delta_across_payload_change() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(["f108b5240101 / 01 = 4: ctlv3 Z1OpMode"])
+
+    assert DUMP._grab_result_delta(baseline, final) == ["f108b5240101 / 01 = 2: ctlv3 Z1OpMode"]
+
+
+# Intent: retain separate ebusd result rows that share one unknown ID prefix.
+# Why: configured messages can use longer IDs than the generic unknown-message key.
+def test_grab_delta_matches_distinct_unknown_rows_with_shared_id_prefix() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        [
+            "3108b516081001ffff02054135 / 0b0100050205413500000000 = 5",
+            "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 4",
+        ]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            "3108b516081001ffff02054135 / 0b0100050205413500000000 = 6",
+            "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 7",
+        ]
+    )
+
+    assert DUMP._grab_result_delta(baseline, final) == [
+        "3108b516081001ffff02054135 / 0b0100050205413500000000 = 1",
+        "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 3",
+    ]
+
+
+# Intent: include a new final request variant only when prior rows in its family remain stable.
+# Why: ebusd can retain separate hidden message keys under one visible unknown ID prefix.
+def test_grab_delta_includes_new_row_in_stable_multi_row_family() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        [
+            "3108b516081001ffff02054135 / 0b0100050205413500000000 = 5",
+            "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 4",
+        ]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            "3108b516081001ffff02054135 / 0b0100050205413500000000 = 7",
+            "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 5",
+            "3108b516081001ffff02053d35 / 0b01000502053d3500000000 = 2",
+        ]
+    )
+
+    assert DUMP._grab_result_delta(baseline, final) == [
+        "3108b516081001ffff02054135 / 0b0100050205413500000000 = 2",
+        "3108b516081001ffff02053e35 / 0b01000502053e3500000000 = 1",
+        "3108b516081001ffff02053d35 / 0b01000502053d3500000000 = 2",
+    ]
+
+
+# Intent: reject label changes in a multi-row known-message family.
+# Why: the label is part of the visible row signature used when ebusd hides its internal key.
+def test_grab_delta_fails_when_multi_row_label_changes() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        [
+            "f108b5240100 / 00 = 5: ctlv3 Z1OpMode",
+            "f108b5240101 / 01 = 4: ctlv3 Z1OpMode",
+        ]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            "f108b5240100 / 00 = 7: ctlv3 Z1OpMode",
+            "f108b5240101 / 01 = 6: ctlv3 z1opmode",
+        ]
+    )
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="row changed"):
+        DUMP._grab_result_delta(baseline, final)
+
+
+# Intent: verify that a new final-only message family contributes its cumulative count.
+# Why: ebusd stores new message keys in the shared auto-grab result without clearing the baseline.
+def test_grab_delta_includes_final_only_family() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 7: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(
+        [
+            "f108b5240100 / 00 = 7: ctlv3 Z1OpMode",
+            "f108b5240101 / 01 = 3: ctlv3 Z1DhwOpMode",
+        ]
+    )
+
+    assert DUMP._grab_result_delta(baseline, final) == [
+        "f108b5240101 / 01 = 3: ctlv3 Z1DhwOpMode",
+    ]
+
+
+# Intent: retain known message variants with the same header and label when their requests stay stable.
+# Why: ebusd can store multiple message definitions under one visible circuit/name family.
+def test_grab_delta_matches_known_variants_by_stable_request() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        [
+            "10feb516080037560802100526 = 5: Broadcast Vdatetime",
+            "10feb516080016551428090126 = 2: Broadcast Vdatetime",
+        ]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            "10feb516080037560802100526 = 6: Broadcast Vdatetime",
+            "10feb516080016551428090126 = 4: Broadcast Vdatetime",
+        ]
+    )
+
+    assert DUMP._grab_result_delta(baseline, final) == [
+        "10feb516080037560802100526 = 1: Broadcast Vdatetime",
+        "10feb516080016551428090126 = 2: Broadcast Vdatetime",
+    ]
+
+
+# Intent: expose the global grab reset/refill case that count snapshots cannot distinguish.
+# Why: the dump metadata must state this upstream limitation instead of claiming exact isolation.
+def test_grab_delta_documents_unobservable_external_reset_refill() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 7: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(["f108b5240100 / 01 = 10: ctlv3 Z1OpMode"])
+
+    assert DUMP._grab_result_delta(baseline, final) == ["f108b5240100 / 01 = 3: ctlv3 Z1OpMode"]
+    assert "no grab epoch" in DUMP.GRAB_COUNT_DELTA_LIMITATION
+    assert "cannot be detected" in DUMP.GRAB_COUNT_DELTA_LIMITATION
+
+
+# Intent: sum per-key counts when ebusd emits identical visible duplicate rows.
+# Why: each received telegram updates one internal key even when output rows look identical.
+def test_grab_delta_sums_identical_visible_rows() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        [
+            "f115b503020001 / 0affffffffffffffffffff = 1: ctlv2 Currenterror",
+            "f115b503020001 / 0affffffffffffffffffff = 5340: ctlv2 Currenterror",
+        ]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            "f115b503020001 / 0affffffffffffffffffff = 1: ctlv2 Currenterror",
+            "f115b503020001 / 0affffffffffffffffffff = 3: ctlv2 Currenterror",
+            "f115b503020001 / 0affffffffffffffffffff = 5342: ctlv2 Currenterror",
+        ]
+    )
+
+    assert DUMP._grab_result_delta(baseline, final) == [
+        "f115b503020001 / 0affffffffffffffffffff = 5: ctlv2 Currenterror"
+    ]
+
+
+# Intent: enforce the supported decimal counter width without rejecting the boundary value.
+# Why: ebusd counters must stay parseable and oversized input must fall back safely.
+def test_grab_result_count_length_boundary() -> None:
+    valid = DUMP._validate_grab_result_response([f"f108b5240100 / 00 = {'9' * 20}: ctlv3 Z1OpMode"])
+
+    assert valid[0].count == int("9" * 20)
+    with pytest.raises(HomeAssistantError, match="invalid telegram"):
+        DUMP._validate_grab_result_response([f"f108b5240100 / 00 = {'9' * 21}: ctlv3 Z1OpMode"])
+
+
+# Intent: reject a result snapshot after ebusd stopped global grabbing.
+# Why: `grab disabled` is not an empty but valid capture result.
+async def test_async_grab_rejects_disabled_continued_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[str] = []
+
+    # Intent: simulate another client stopping the global grab between snapshots.
+    # Why: the continued export must not claim traffic after ebusd cleared its buffer.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        commands.append(command)
+        return ["grab continued"] if command == "grab" else ["grab disabled"]
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="disabled"):
+        await DUMP.async_grab("127.0.0.1", 8888, 0)
+
+    assert commands == ["grab", "grab result all"]
+
+
+# Intent: keep continued-capture cancellation from stopping ebusd's global grab.
+# Why: a canceled service owns no daemon-wide capture when ebusd reports `grab continued`.
+async def test_async_grab_cancellation_does_not_stop_continued_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    waiting = asyncio.Event()
+
+    # Intent: block after the baseline snapshot until the test cancels the caller.
+    # Why: cancellation must preserve the always-on ebusd grab.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        commands.append(command)
+        return ["grab continued"] if command == "grab" else []
+
+    # Intent: expose the capture wait so cancellation occurs inside the interval.
+    # Why: this is the lifecycle boundary that could otherwise trigger grab cleanup.
+    async def _blocked_sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+    monkeypatch.setattr(DUMP.asyncio, "sleep", _blocked_sleep)
+    task = asyncio.create_task(DUMP.async_grab("127.0.0.1", 8888, 30))
+    await asyncio.wait_for(waiting.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert commands == ["grab", "grab result all"]
+
+
+# Intent: write a register-only snapshot when continued-grab counts cannot be isolated.
+# Why: raw data must not be presented as interval capture after ebusd clears its shared buffer.
+async def test_export_dump_falls_back_when_continued_grab_delta_is_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ha_components.persistent_notification.create.reset_mock()
+    hass = MagicMock()
+    hass.config.path.return_value = str(tmp_path)
+    # Intent: execute the persistence worker inline for this export test.
+    # Why: assertions inspect the completed YAML before returning.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
+    coordinator = _coordinator(str(tmp_path))
+    coordinator.ebus = MagicMock()
+    coordinator.ebus.is_connected = True
+    coordinator.ebus.version = "26.1"
+    coordinator.ebus.find_registers = AsyncMock(return_value=[])
+    coordinator.ebus.get_info = AsyncMock(return_value={"version": "26.1"})
+    coordinator._ebusd_connected = True
+    coordinator._graph = tc.DeviceGraph(
+        nodes={"hmux0": tc.DeviceNode("hmux0", tc.DeviceType.HEAT_PUMP, has_data=True)},
+        raw_registers={},
+        placeholder_registers=set(),
+    )
+    commands: list[str] = []
+    snapshots = iter(
+        [
+            ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode"],
+            ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"],
+        ]
+    )
+
+    # Intent: feed a cumulative-counter reset through the real exporter capture flow.
+    # Why: the saved YAML must mark raw data unavailable while retaining registers.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        commands.append(command)
+        return ["grab continued"] if command == "grab" else next(snapshots)
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+    monkeypatch.setattr(DUMP, "REGISTER_MAP", {})
+
+    await DUMP.async_export_discovery_dump(hass, coordinator, grab_duration=0.01)
+
+    dump_path = next(tmp_path.glob("discovery_dump_*.yaml"))
+    dump_data = DUMP.yaml.safe_load(dump_path.read_text())
+    assert dump_data["metadata"]["grab_duration"] == 0.01
+    assert dump_data["metadata"]["grab_status"] == "skipped_active"
+    assert dump_data["metadata"]["grab_captured_duration"] == 0
+    assert dump_data["metadata"]["grab_capture_method"] == "count_delta"
+    assert "counter decreased" in dump_data["metadata"]["grab_error"]
+    assert "grab" not in dump_data
+    assert {"metadata", "raw_find_lines", "before_registers", "registers"} <= dump_data.keys()
+    assert commands == ["grab", "grab result all", "grab result all"]
+    notification = _ha_components.persistent_notification.create.call_args.args[1]
+    assert "raw ebus capture could not be isolated" in notification.casefold()
+
+
+# Intent: record a continued global capture as a count-delta interval in the dump metadata.
+# Why: users need to distinguish a daemon-owned grab from a service-owned capture.
+async def test_export_dump_records_continued_capture_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ha_components.persistent_notification.create.reset_mock()
+    hass = MagicMock()
+    hass.config.path.return_value = str(tmp_path)
+    # Intent: execute the persistence worker inline for this export test.
+    # Why: assertions inspect the completed YAML before returning.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
+    coordinator = _coordinator(str(tmp_path))
+    coordinator.ebus = MagicMock()
+    coordinator.ebus.is_connected = True
+    coordinator.ebus.version = "26.1.8"
+    coordinator.ebus.find_registers = AsyncMock(return_value=[])
+    coordinator.ebus.get_info = AsyncMock(return_value={"version": "26.1.8"})
+    coordinator._ebusd_connected = True
+    coordinator._graph = tc.DeviceGraph(
+        nodes={"hmux0": tc.DeviceNode("hmux0", tc.DeviceType.HEAT_PUMP, has_data=True)},
+        raw_registers={},
+        placeholder_registers=set(),
+    )
+    monkeypatch.setattr(
+        DUMP,
+        "async_grab",
+        AsyncMock(
+            return_value=DUMP.GrabCaptureResult(
+                lines=("[grab] grab continued", "10feb51603016019 / 00 = 2"),
+                status="continued",
+                duration=1.25,
+            )
+        ),
+    )
+    monkeypatch.setattr(DUMP, "REGISTER_MAP", {})
+
+    await DUMP.async_export_discovery_dump(hass, coordinator, grab_duration=1)
+
+    dump_path = next(tmp_path.glob("discovery_dump_*.yaml"))
+    dump_data = DUMP.yaml.safe_load(dump_path.read_text())
+    metadata = dump_data["metadata"]
+    assert metadata["grab_duration"] == 1
+    assert metadata["grab_status"] == "continued"
+    assert metadata["grab_captured_duration"] == 1.25
+    assert metadata["grab_capture_method"] == "count_delta"
+    assert "no grab epoch" in metadata["grab_capture_limitation"]
+    assert dump_data["grab"] == ["[grab] grab continued", "10feb51603016019 / 00 = 2"]
+
+
+# Intent: mark zero-second exports as having no raw capture requested or captured.
+# Why: the live release smoke test must distinguish a register dump from a traffic capture.
+async def test_export_dump_marks_zero_second_capture_as_not_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = MagicMock()
+    hass.config.path.return_value = str(tmp_path)
+    # Intent: execute the persistence worker inline for this export test.
+    # Why: assertions inspect the completed YAML before returning.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
+    coordinator = _coordinator(str(tmp_path))
+    coordinator.ebus = MagicMock()
+    coordinator.ebus.is_connected = True
+    coordinator.ebus.version = "26.1"
+    coordinator.ebus.find_registers = AsyncMock(return_value=[])
+    coordinator.ebus.get_info = AsyncMock(return_value={"version": "26.1"})
+    coordinator._ebusd_connected = True
+    coordinator._graph = tc.DeviceGraph(
+        nodes={"hmux0": tc.DeviceNode("hmux0", tc.DeviceType.HEAT_PUMP, has_data=True)},
+        raw_registers={},
+        placeholder_registers=set(),
+    )
+    async_grab = AsyncMock()
+    monkeypatch.setattr(DUMP, "async_grab", async_grab)
+    monkeypatch.setattr(DUMP, "REGISTER_MAP", {})
+
+    await DUMP.async_export_discovery_dump(hass, coordinator, grab_duration=0)
+
+    dump_path = next(tmp_path.glob("discovery_dump_*.yaml"))
+    metadata = DUMP.yaml.safe_load(dump_path.read_text())["metadata"]
+    assert metadata["grab_duration"] == 0
+    assert metadata["grab_status"] == "not_requested"
+    assert metadata["grab_captured_duration"] == 0
+    assert metadata["grab_capture_method"] == "none"
+    assert "grab_error" not in metadata
+    async_grab.assert_not_awaited()
+
+
+# Intent: fall back to register-only data after result retrieval fails, then clean an acknowledged owned grab.
+# Why: raw capture is optional, but an exporter-started global session still needs cleanup.
 async def test_async_grab_transport_failure_still_stops_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     commands: list[str] = []
 
     # Intent: fail result retrieval while allowing the cleanup command to succeed.
-    # Why: the original transport failure must propagate after cleanup.
+    # Why: the service should save registers after the raw interval becomes unavailable.
     async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
         commands.append(command)
         if command == "grab result all":
@@ -902,7 +1503,7 @@ async def test_async_grab_transport_failure_still_stops_capture(monkeypatch: pyt
 
     monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
 
-    with pytest.raises(ConnectionError, match="grab transport failed"):
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="grab transport failed"):
         await DUMP.async_grab("127.0.0.1", 8888, 0)
 
     assert commands == ["grab", "grab result all", "grab stop"]
@@ -923,7 +1524,9 @@ async def test_async_grab_accepts_exact_acknowledgements_and_empty_result(monkey
 
     monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
 
-    assert await DUMP.async_grab("127.0.0.1", 8888, 0) == ["[grab] grab started", "[grab stop] grab stopped"]
+    capture = await DUMP.async_grab("127.0.0.1", 8888, 0)
+    assert capture.lines == ("[grab] grab started", "[grab stop] grab stopped")
+    assert capture.status == "captured"
     assert commands == ["grab", "grab result all", "grab stop"]
 
 
@@ -1002,32 +1605,89 @@ async def test_async_grab_rejects_extra_lifecycle_response_lines(
     assert commands == (["grab"] if failed_command == "grab" else ["grab", "grab result all", "grab stop"])
 
 
-# Intent: fail dump export if the raw-grab transport fails after capture starts.
-# Why: an error response must not be serialized or announced as a successful dump.
-async def test_export_dump_fails_when_grab_transport_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# Intent: save a register-only dump when grab startup or a continued snapshot fails.
+# Why: raw capture is optional, and an unowned stop could disable another client's global grab.
+@pytest.mark.parametrize("failure_stage", ["start", "baseline", "final", "baseline_count", "baseline_line"])
+async def test_export_dump_falls_back_when_capture_transport_fails(
+    failure_stage: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _ha_components.persistent_notification.create.reset_mock()
     hass = MagicMock()
     hass.config.path.return_value = str(tmp_path)
+    # Intent: execute the persistence worker inline for this export test.
+    # Why: assertions inspect the completed YAML before returning.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
     coordinator = _coordinator(str(tmp_path))
     coordinator.ebus = MagicMock()
     coordinator.ebus.is_connected = True
+    coordinator.ebus.version = "26.1"
     coordinator.ebus.find_registers = AsyncMock(return_value=[])
+    coordinator.ebus.get_info = AsyncMock(return_value={"version": "26.1"})
     coordinator._ebusd_connected = True
     coordinator._graph = tc.DeviceGraph(
         nodes={"hmux0": tc.DeviceNode("hmux0", tc.DeviceType.HEAT_PUMP, has_data=True)},
         raw_registers={},
         placeholder_registers=set(),
     )
-    monkeypatch.setattr(DUMP, "async_grab", AsyncMock(side_effect=ConnectionError("grab transport failed")))
-    monkeypatch.setattr(DUMP, "_persist_dump", AsyncMock())
+    commands: list[str] = []
+    result_calls = 0
+
+    # Intent: fail start or snapshot transport at the selected point in the flow.
+    # Why: prove each optional raw-capture failure persists register-only output.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        nonlocal result_calls
+        commands.append(command)
+        if command == "grab":
+            if failure_stage == "start":
+                raise ConnectionError("start acknowledgement lost")
+            return ["grab continued"]
+        result_calls += 1
+        if failure_stage == "baseline" and result_calls == 1:
+            raise ConnectionError("baseline transport failed")
+        if failure_stage == "baseline_count" and result_calls == 1:
+            return [f"f108b5240100 / 00 = {'9' * 4301}: ctlv3 Z1OpMode"]
+        if failure_stage == "baseline_line" and result_calls == 1:
+            raise HomeAssistantError("ebusd grab result all response line exceeded the stream limit")
+        if failure_stage == "final" and result_calls == 2:
+            raise ConnectionError("final transport failed")
+        return ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"]
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
     monkeypatch.setattr(DUMP, "REGISTER_MAP", {})
 
-    with pytest.raises(HomeAssistantError, match="Failed to capture raw eBUS traffic"):
-        await DUMP.async_export_discovery_dump(hass, coordinator, grab_duration=1)
+    await DUMP.async_export_discovery_dump(hass, coordinator, grab_duration=1)
 
-    DUMP._persist_dump.assert_not_awaited()
-    DUMP.async_grab.assert_awaited_once()
-    _ha_components.persistent_notification.create.assert_not_called()
+    dump_path = next(tmp_path.glob("discovery_dump_*.yaml"))
+    dump_data = DUMP.yaml.safe_load(dump_path.read_text())
+    expected_status = "unavailable" if failure_stage == "start" else "skipped_active"
+    expected_method = "none" if failure_stage == "start" else "count_delta"
+    expected_error = {
+        "start": "start acknowledgement lost",
+        "baseline": "baseline transport failed",
+        "final": "final transport failed",
+        "baseline_count": "invalid telegram",
+        "baseline_line": "response line exceeded the stream limit",
+    }[failure_stage]
+    assert dump_data["metadata"]["grab_status"] == expected_status
+    assert dump_data["metadata"]["grab_capture_method"] == expected_method
+    assert expected_error in dump_data["metadata"]["grab_error"]
+    if failure_stage != "start":
+        assert "grab_capture_limitation" in dump_data["metadata"]
+    assert "grab" not in dump_data
+    expected_commands = (
+        ["grab"]
+        if failure_stage == "start"
+        else [
+            "grab",
+            "grab result all",
+        ]
+    )
+    if failure_stage == "final":
+        expected_commands.append("grab result all")
+    assert commands == expected_commands
+    _ha_components.persistent_notification.create.assert_called_once()
 
 
 # Intent: bound a stalled raw ebusd TCP connection attempt.
@@ -1119,7 +1779,7 @@ async def test_async_grab_does_not_stop_after_ambiguous_start_failure(monkeypatc
 
     monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
 
-    with pytest.raises(ConnectionError, match="start acknowledgement lost"):
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="start acknowledgement lost"):
         await DUMP.async_grab("127.0.0.1", 8888, 0)
 
     assert commands == ["grab"]

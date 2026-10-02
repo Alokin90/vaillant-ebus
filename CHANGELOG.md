@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.10.2 - 2026-10-02
+
+### Fixed
+
+- Keep a discovery dump when another client already owns ebusd's global raw
+  capture. On ebusd versions with automatic grab, the export compares before
+  and after counts without stopping the daemon-wide session; if it cannot
+  isolate the interval or parse a complete snapshot, it saves a marked
+  register-only dump instead.
+- Record requested and captured duration, capture method and status in the dump
+  metadata. Continued captures retain only the last payload per message key and
+  sum counts for identical visible rows. ebusd does not expose an
+  epoch to detect an external stop/restart followed by a count refill during
+  the interval. Do not run external grab commands or restart ebusd while the
+  export runs; if ebusd accepts a start command but its acknowledgement is lost,
+  the service will not send an unowned stop and grabbing may remain enabled.
+
 ## 1.10.1 - 2026-09-30
 
 ### Added

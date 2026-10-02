@@ -319,6 +319,43 @@ python3 tools/version.py check
 python3 -m compileall -f custom_components/vaillant_ebus/
 ```
 
+## Home Assistant Release Smoke Test
+
+Every release candidate must exercise the discovery-dump service on the owner's
+Home Assistant server after deployment; a successful startup or unit test alone
+does not cover this service.
+
+1. Deploy the candidate with `scripts/deploy.sh --restart` after repository
+   validation passes. Do not substitute an ad-hoc SSH/SMB deployment.
+2. Through HA-MCP, confirm the `vaillant_ebus` entry is loaded. Call
+   `vaillant_ebus.export_discovery_dump` once with `grab_duration: 0`, then
+   again with a short positive duration such as one second. Do not run external
+   `grab`/`grab stop` commands or restart ebusd during the positive-duration
+   call; the protocol has no session ID to protect against those races.
+   Run only one export per ebusd endpoint at a time, including across separate
+   Home Assistant instances.
+3. Read both newly written files from the paths in the service log/notification.
+   Use an HA-MCP file-read tool when available; use the documented read-only SSH
+   path only if HA-MCP cannot expose the file.
+4. Parse both files as YAML and verify `metadata`, `raw_find_lines`,
+   `before_registers`, and `registers`. For the zero-second dump, require
+   `grab_status: not_requested` and `grab_captured_duration: 0`. On the owner's
+   current ebusd version, the positive-duration dump should report
+   `grab_status: continued`, `grab_capture_method: count_delta`, and a positive
+   `grab_captured_duration` plus `grab_capture_limitation`; older ebusd versions
+   may report an owned `captured` session instead. The continued capture keeps
+   only the last payload for each message key and cannot detect an external grab
+   stop/restart during its interval, so do not claim it preserves every state
+   transition.
+5. After the positive-duration call, use the documented read-only ebusd command
+   `grab result all` through SSH and confirm the response is not `grab disabled`.
+   Do not use `grab` as a status probe because it can start capture and hide a
+   stopped state.
+6. Check fresh HA logs for errors from `custom_components.vaillant_ebus` and
+   record the service results and both dump paths in the release plan. A service
+   error, missing file, invalid YAML, or missing required section fails the
+   smoke test.
+
 ## Release Versioning
 
 - The release version must stay identical across `pyproject.toml`, `custom_components/vaillant_ebus/manifest.json`, and the top `## <version>` heading in `CHANGELOG.md`.

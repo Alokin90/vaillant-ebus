@@ -9,7 +9,9 @@ import socket
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from weakref import WeakKeyDictionary
 
 import yaml
@@ -35,9 +37,41 @@ _LOGGER = logging.getLogger(__name__)
 GRAB_CONNECT_TIMEOUT = 5
 GRAB_MAX_RESPONSE_LINES = 10_000
 GRAB_RESPONSE_TIMEOUT = 30
+GRAB_COUNT_DELTA_LIMITATION = (
+    "results keep the latest payload per key; identical visible rows are coalesced by summed counts; "
+    "ebusd exposes no grab epoch, so a stop/restart followed by count refill during this interval cannot be detected; "
+    "external grab commands or daemon restarts must not run during export"
+)
 _GRAB_SESSION_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Lock]] = (
     WeakKeyDictionary()
 )
+
+
+class GrabIntervalUnavailableError(HomeAssistantError):
+    """Raised when ebusd's shared grab snapshots cannot be safely diffed."""
+
+    capture_method = "count_delta"
+
+
+@dataclass(frozen=True, slots=True)
+class GrabResultEntry:
+    """One validated row from `grab result all`."""
+
+    key: str
+    family: str
+    count: int
+    line: str
+    request: bytes
+    response: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class GrabCaptureResult:
+    """Raw lines and timing metadata for one exporter-owned capture interval."""
+
+    lines: tuple[str, ...]
+    status: Literal["captured", "continued"]
+    duration: float
 
 
 # Intent: resolve hostnames to the socket addresses used for dump-lock identity.
@@ -281,6 +315,8 @@ async def _grab_cmd(
                 line = await asyncio.wait_for(reader.readline(), timeout=remaining)
             except TimeoutError as exc:
                 raise TimeoutError(f"ebusd {command} response timed out before its blank-line terminator") from exc
+            except ValueError as exc:
+                raise HomeAssistantError(f"ebusd {command} response line exceeded the stream limit") from exc
             if not line:
                 raise ConnectionError(f"ebusd closed {command} response before its blank-line terminator")
             decoded = line.decode().strip()
@@ -338,7 +374,7 @@ async def _stop_grab_uninterruptibly(host: str, port: int) -> list[str]:
     return stop_response
 
 
-# Intent: validate ebusd grab errors and the explicit start/stop acknowledgements.
+# Intent: validate ebusd grab errors and recognize owned or already-active sessions.
 # Why: `_grab_cmd` treats protocol replies as data rather than exceptions.
 def _validate_grab_response(command: str, response: list[str]) -> None:
     error = next(
@@ -347,6 +383,8 @@ def _validate_grab_response(command: str, response: list[str]) -> None:
     )
     if error is not None:
         raise HomeAssistantError(f"ebusd {command} failed: {error}")
+    if command == "grab" and len(response) == 1 and response[0].strip().casefold() == "grab continued":
+        return
     expected_acknowledgement = {"grab": "grab started", "grab stop": "grab stopped"}.get(command)
     if expected_acknowledgement and (len(response) != 1 or response[0].strip().casefold() != expected_acknowledgement):
         action = "that the grab started" if command == "grab" else "that the grab stopped"
@@ -359,42 +397,138 @@ def _validate_grab_stop_response(response: list[str]) -> None:
     _validate_grab_response("grab stop", response)
 
 
-# Intent: accept only ebusd-formatted telegram records from a successful grab result.
-# Why: arbitrary non-error text is not evidence that a discovery capture completed.
-def _validate_grab_result_response(response: list[str]) -> None:
+# Intent: validate and index one ebusd grab-result snapshot.
+# Why: interval deltas need stable message identities and cumulative counts.
+def _validate_grab_result_response(response: list[str]) -> list[GrabResultEntry]:
     _validate_grab_response("grab result all", response)
+    if response == ["grab disabled"]:
+        raise GrabIntervalUnavailableError("ebusd disabled the global grab during capture")
+    entries: list[GrabResultEntry] = []
     for line in response:
         payload, separator, summary = line.partition(" = ")
         request, response_separator, response_data = payload.partition(" / ")
-        count = summary.partition(": ")[0].strip()
+        count_text, label_separator, label = summary.partition(": ")
+        count_text = count_text.strip()
         try:
             request_bytes = bytes.fromhex(request.strip())
             response_bytes = bytes.fromhex(response_data.strip()) if response_separator else None
         except ValueError as exc:
             raise HomeAssistantError(f"ebusd grab result all returned an invalid telegram: {line}") from exc
-        if not separator or len(request_bytes) < 4 or not count.isdecimal() or int(count) < 1:
+        if (
+            not separator
+            or len(request_bytes) < 5
+            or len(request_bytes) != 5 + request_bytes[4]
+            or not count_text.isdecimal()
+            or len(count_text) > 20
+            or int(count_text) < 1
+        ):
             raise HomeAssistantError(f"ebusd grab result all returned an invalid telegram: {line}")
         if response_separator and not response_bytes:
             raise HomeAssistantError(f"ebusd grab result all returned an invalid telegram: {line}")
+        if label_separator:
+            family = f"known:{request_bytes[1:4].hex()}:{label}"
+            key = f"known:{request_bytes.hex()}:{response_bytes.hex() if response_bytes is not None else ''}:{label}"
+        else:
+            id_length = min(request_bytes[4], 1 if request_bytes[1] == 0xFE else 4)
+            id_bytes = request_bytes[5 : 5 + id_length].hex()
+            family = f"unknown:{request_bytes[1:4].hex()}:{id_length}:{id_bytes}"
+            key = f"unknown:{request_bytes.hex()}:{response_bytes.hex() if response_bytes is not None else ''}"
+        entries.append(GrabResultEntry(key, family, int(count_text), line, request_bytes, response_bytes))
+    return entries
 
 
-# Intent: capture raw traffic for a bounded duration and always stop the ebusd grab.
-# Why: unload can interrupt a user-requested capture before its configured duration.
+# Intent: combine counts for ebusd rows with the same visible request/response/label.
+# Why: duplicate definitions can expose identical rows while each bus event updates only one internal message key.
+def _coalesce_grab_result_entries(entries: list[GrabResultEntry]) -> list[GrabResultEntry]:
+    by_key: dict[str, GrabResultEntry] = {}
+    for entry in entries:
+        previous = by_key.get(entry.key)
+        if previous is None:
+            by_key[entry.key] = entry
+        else:
+            by_key[entry.key] = GrabResultEntry(
+                entry.key,
+                entry.family,
+                previous.count + entry.count,
+                entry.line,
+                entry.request,
+                entry.response,
+            )
+    return list(by_key.values())
+
+
+# Intent: derive only messages observed between two snapshots of a continued grab.
+# Why: ebusd keeps one latest payload and cumulative count per global message key.
+def _grab_result_delta(
+    baseline: list[GrabResultEntry],
+    final: list[GrabResultEntry],
+) -> list[str]:
+    baseline = _coalesce_grab_result_entries(baseline)
+    final = _coalesce_grab_result_entries(final)
+    final_by_key = {entry.key: entry for entry in final}
+    baseline_families: dict[str, list[GrabResultEntry]] = {}
+    final_families: dict[str, list[GrabResultEntry]] = {}
+    for entry in baseline:
+        baseline_families.setdefault(entry.family, []).append(entry)
+    for entry in final:
+        final_families.setdefault(entry.family, []).append(entry)
+
+    previous_counts: dict[str, int] = {}
+    for family, baseline_entries in baseline_families.items():
+        if family not in final_families:
+            raise GrabIntervalUnavailableError("ebusd grab baseline message family disappeared during capture")
+        final_entries = final_families[family]
+        if len(baseline_entries) == 1 and len(final_entries) == 1:
+            previous, current = baseline_entries[0], final_entries[0]
+            if previous.request[0] != current.request[0]:
+                raise GrabIntervalUnavailableError("ebusd grab source address changed during capture")
+            previous_counts[current.key] = previous.count
+            continue
+        final_keys = {entry.key for entry in final_entries}
+        for previous in baseline_entries:
+            if previous.key not in final_keys:
+                raise GrabIntervalUnavailableError("ebusd grab row changed in a multi-row message family")
+            current = final_by_key[previous.key]
+            if previous.request[0] != current.request[0]:
+                raise GrabIntervalUnavailableError("ebusd grab source address changed during capture")
+            previous_counts[previous.key] = previous.count
+
+    delta_lines: list[str] = []
+    for key, entry in final_by_key.items():
+        previous_count = previous_counts.get(key, 0)
+        if entry.count < previous_count:
+            raise GrabIntervalUnavailableError("ebusd grab counter decreased during capture")
+        delta_count = entry.count - previous_count
+        if delta_count == 0:
+            continue
+        payload, _, summary = entry.line.partition(" = ")
+        _, label_separator, label = summary.partition(": ")
+        suffix = f": {label}" if label_separator else ""
+        delta_lines.append(f"{payload} = {delta_count}{suffix}")
+    return delta_lines
+
+
+# Intent: capture raw traffic for a bounded duration without stopping shared auto-grab.
+# Why: unload cleans up owned captures, but a continued session belongs to ebusd.
 async def async_grab(
     host: str,
     port: int,
     duration: int,
     ensure_active: Callable[[], None] | None = None,
-) -> list[str]:
+) -> GrabCaptureResult:
     lines: list[str] = []
     grab_started = False
     cancelled = False
+    capture_status: Literal["captured", "continued"] = "captured"
+    captured_duration = 0.0
+    capture_started_at: float | None = None
 
-    # Intent: record global grab ownership as soon as ebusd sends its start ACK.
-    # Why: unload may cancel socket cleanup after the ACK but before `_grab_cmd` returns.
+    # Intent: record an exporter-started grab as soon as ebusd sends its start ACK.
+    # Why: the shared protocol has no session ID, so the operator must not mutate grab state during export.
     def _mark_grab_started() -> None:
-        nonlocal grab_started
+        nonlocal capture_started_at, grab_started
         grab_started = True
+        capture_started_at = asyncio.get_running_loop().time()
 
     try:
         if ensure_active is not None:
@@ -407,30 +541,63 @@ async def async_grab(
             on_grab_started=_mark_grab_started,
         )
         _validate_grab_response("grab", enable_resp)
-        grab_started = True
+        grab_started = enable_resp[0].strip().casefold() == "grab started"
+        capture_status = "captured" if grab_started else "continued"
         lines.append(f"[grab] {enable_resp[0]}")
+        if grab_started and capture_started_at is None:
+            capture_started_at = asyncio.get_running_loop().time()
         if ensure_active is not None:
             ensure_active()
 
-        deadline = asyncio.get_running_loop().time() + duration
+        baseline_entries: list[GrabResultEntry] = []
+        if capture_status == "continued":
+            loop = asyncio.get_running_loop()
+            capture_started_at = loop.time()
+            baseline_response = await _grab_cmd(host, port, "grab result all", ensure_active=ensure_active)
+            if ensure_active is not None:
+                ensure_active()
+            try:
+                baseline_entries = _validate_grab_result_response(baseline_response)
+            except HomeAssistantError as exc:
+                raise GrabIntervalUnavailableError(f"ebusd grab baseline was unusable: {exc}") from exc
+        loop = asyncio.get_running_loop()
+        assert capture_started_at is not None
+        deadline = capture_started_at + duration
         while True:
             if ensure_active is not None:
                 ensure_active()
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(0.25, remaining))
 
         if ensure_active is not None:
             ensure_active()
+        captured_duration = max(0.0, loop.time() - capture_started_at)
         result_resp = await _grab_cmd(host, port, "grab result all", ensure_active=ensure_active)
         if ensure_active is not None:
             ensure_active()
-        _validate_grab_result_response(result_resp)
-        lines.extend(result_resp)
+        try:
+            result_entries = _validate_grab_result_response(result_resp)
+        except HomeAssistantError as exc:
+            raise GrabIntervalUnavailableError(f"ebusd grab final snapshot was unusable: {exc}") from exc
+        if capture_status == "continued":
+            lines.extend(_grab_result_delta(baseline_entries, result_entries))
+        else:
+            lines.extend(entry.line for entry in result_entries)
+    except GrabIntervalUnavailableError as exc:
+        if grab_started:
+            exc.capture_method = "owned_session"
+        raise
     except asyncio.CancelledError:
         cancelled = True
         raise
+    except (HomeAssistantError, ConnectionError, EOFError, OSError, TimeoutError, UnicodeError) as exc:
+        unavailable = GrabIntervalUnavailableError(f"ebusd grab capture failed: {exc}")
+        unavailable.capture_method = (
+            "owned_session" if grab_started else "count_delta" if capture_status == "continued" else "none"
+        )
+        raise unavailable from exc
     finally:
         if grab_started:
             try:
@@ -439,16 +606,20 @@ async def async_grab(
             except HomeAssistantError as exc:
                 if cancelled:
                     raise asyncio.CancelledError from exc
-                raise
+                unavailable = GrabIntervalUnavailableError(f"could not stop exporter-started ebusd grab: {exc}")
+                unavailable.capture_method = "owned_session"
+                raise unavailable from exc
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 _LOGGER.error("Failed to stop ebusd grab after capture: %s", exc)
                 if cancelled:
                     raise asyncio.CancelledError from exc
-                raise HomeAssistantError("Could not stop ebusd traffic capture.") from exc
+                unavailable = GrabIntervalUnavailableError("could not stop exporter-started ebusd grab")
+                unavailable.capture_method = "owned_session"
+                raise unavailable from exc
 
-    return lines
+    return GrabCaptureResult(tuple(lines), capture_status, captured_duration)
 
 
 # Intent: track dump exports so config-entry unload can cancel them.
@@ -531,14 +702,32 @@ async def _async_export_discovery_dump_impl(
     )
     ensure_active()
 
-    grab_lines = []
+    grab_lines: list[str] = []
+    grab_status = "not_requested"
+    grab_captured_duration = 0.0
+    grab_capture_method = "none"
+    grab_error: str | None = None
+    grab_capture_limitation: str | None = None
     if grab_duration > 0:
         _LOGGER.info("Capturing raw eBUS traffic for %d seconds...", grab_duration)
         try:
-            grab_lines = await async_grab(
+            capture = await async_grab(
                 coordinator.ebusd_host, coordinator.ebusd_port, grab_duration, ensure_active=ensure_active
             )
+            grab_lines = list(capture.lines)
+            grab_status = capture.status
+            grab_captured_duration = capture.duration
+            grab_capture_method = "owned_session" if capture.status == "captured" else "count_delta"
+            if capture.status == "continued":
+                grab_capture_limitation = GRAB_COUNT_DELTA_LIMITATION
             _LOGGER.info("Captured %d raw lines", len(grab_lines))
+        except GrabIntervalUnavailableError as exc:
+            grab_status = "skipped_active" if exc.capture_method == "count_delta" else "unavailable"
+            grab_capture_method = exc.capture_method
+            grab_error = str(exc)
+            if exc.capture_method == "count_delta":
+                grab_capture_limitation = GRAB_COUNT_DELTA_LIMITATION
+            _LOGGER.warning("Raw eBUS capture could not be isolated from the active global grab: %s", exc)
         except HomeAssistantError:
             raise
         except Exception as exc:
@@ -572,6 +761,9 @@ async def _async_export_discovery_dump_impl(
             "ebusd_version": ebus.version,
             "register_count": len(after_registers if has_after_snapshot else before_registers),
             "grab_duration": grab_duration,
+            "grab_status": grab_status,
+            "grab_captured_duration": grab_captured_duration,
+            "grab_capture_method": grab_capture_method,
             "dump_version": CURRENT_DUMP_VERSION,
             "integration_version": INTEGRATION_VERSION,
             "ebusd_info": ebusd_info,
@@ -584,6 +776,10 @@ async def _async_export_discovery_dump_impl(
         "raw_find_lines": raw_find_lines,
         "before_registers": before_registers,
     }
+    if grab_capture_limitation is not None:
+        dump_data["metadata"]["grab_capture_limitation"] = grab_capture_limitation
+    if grab_error is not None:
+        dump_data["metadata"]["grab_error"] = grab_error
     parsed_telegrams = None
     if grab_lines:
         dump_data["grab"] = grab_lines
@@ -615,9 +811,16 @@ async def _async_export_discovery_dump_impl(
     ensure_active()
     _LOGGER.info("Discovery dump written to %s", filepath)
 
+    message = f"Discovery dump written to:<br><code>{filepath}</code><br><br>Captured {len(grab_lines)} raw grab lines."
+    if grab_error is not None:
+        message += (
+            f"<br><br>Raw eBUS capture could not be isolated: {grab_error}. The register snapshot was still saved."
+        )
+    elif grab_status == "continued":
+        message += "<br><br>Used ebusd auto-grab count deltas; only the latest payload per message key is retained."
     persistent_notification.create(
         hass,
-        (f"Discovery dump written to:<br><code>{filepath}</code><br><br>Captured {len(grab_lines)} raw grab lines."),
+        message,
         title="Vaillant eBUS Discovery Dump",
         notification_id="vaillant_ebus_discovery_dump",
     )
