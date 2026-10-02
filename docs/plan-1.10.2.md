@@ -1,6 +1,6 @@
 # Release 1.10.2 Plan
 
-Status: **PR CI passed on 00b847c; merge/tag/release gates pending**
+Status: **Merge gate passed on c05b391; post-merge CI and tag/release checks pending**
 Date: 2026-10-02
 Parent release: `v1.10.1`
 Execution branch: `release/1.10.2`
@@ -315,8 +315,8 @@ mandatory; deploy with `scripts/deploy.sh --restart` and exercise through HA-MCP
 | HA_SMOKE | PASS | Final executable integration/service files deployed; zero/one-second exports parsed, continued capture reported count_delta and 1.00191 s, and read-only `grab result all` returned 8,213 lines. Later repository-only edits were limited to plan bookkeeping and test comments; no deployed file changed. |
 | REVIEW | PASS | Final independent standard-tier review confirmed all prior findings closed, including direct Intent/Why comments, against the final capture paths and docs |
 | AUDIT | PASS | Final independent deep audit found no remaining counterexample across over-limit lines, count bounds, ownership, external concurrency, cancellation, fallback, and graph guard |
-| PR_CI | PASS | PR #166 checks `ci`, `validate`, and `validate-hacs` passed on current head `00b847c775bf52d44063f3540791bc3db93e4129`; `release` was correctly skipped for a branch PR |
-| RELEASE_GATE | PASS for merge review | Independent gate confirmed the current PR is mergeable with green CI; final gate must recheck after this plan update. Tag/release still require the actual merge SHA and post-merge artifact verification |
+| PR_CI | PASS | PR #166 checks `ci`, `validate`, and `validate-hacs` passed on current head `c05b391a17fb531ad498b0ceb224d711744dc9d3`; `release` was correctly skipped for a branch PR |
+| RELEASE_GATE | PASS for merge | Independent gate approved merge of PR #166 at `c05b391a17fb531ad498b0ceb224d711744dc9d3`; confirm merge SHA and main-branch checks before tagging, then verify the published release artifact |
 
 ## Audit budget
 
