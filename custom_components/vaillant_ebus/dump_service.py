@@ -19,14 +19,18 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from .backend.discovery_service import DiscoveryService
 from .backend.dump_analysis import CURRENT_DUMP_VERSION, normalize_dump
 from .backend.grab_parser import parse_grab_lines, unknown_telegrams
 from .backend.mapping import (
     HMUX0_SW0407_FALLBACK_NAMES,
     REGISTER_MAP,
     VWZIO_SW0500_FALLBACK_NAMES,
-    hmux0_sw0407_circuit,
+    hmux0_candidate_circuits,
+    hmux0_fallback_blocked_circuits,
+    hmux0_sw0303_owner,
     is_field_key,
+    vwz_station_scan_76_circuit,
     vwzio_sw0500_circuit,
 )
 from .backend.models import DeviceGraph, is_no_data_value
@@ -140,12 +144,29 @@ def _fallback_read_skip_keys(graph: DeviceGraph | None, runtime_definitions: lis
         if len(parts) >= 3 and parts[0].startswith("u"):
             skipped.add((parts[1].casefold(), parts[2].casefold()))
 
-    hmux0 = hmux0_sw0407_circuit(graph)
-    if hmux0 is not None:
+    for hmux0 in hmux0_fallback_blocked_circuits(graph):
         skipped.update((hmux0.casefold(), name) for name in HMUX0_SW0407_FALLBACK_NAMES)
+    hmux0_sw0303 = hmux0_sw0303_owner(graph)
+    for circuit in hmux0_candidate_circuits(graph):
+        if hmux0_sw0303 is None or circuit.casefold() != hmux0_sw0303.casefold():
+            skipped.add((circuit.casefold(), "rundatareturntemp"))
     vwzio = vwzio_sw0500_circuit(graph)
     if vwzio is not None:
         skipped.update((vwzio.casefold(), name) for name in VWZIO_SW0500_FALLBACK_NAMES)
+    station_at_76 = vwz_station_scan_76_circuit(graph)
+    for alias in ("vwz", "vwzio"):
+        resolution = graph.resolve_circuit_result(alias) if graph is not None else None
+        resolved = resolution.circuit if resolution and resolution.status.name == "UNIQUE" else None
+        if station_at_76 is None or resolved is None or resolved.casefold() != station_at_76.casefold():
+            skipped.add((alias.casefold(), "status01"))
+            if resolved:
+                skipped.add((resolved.casefold(), "status01"))
+    resolution = graph.resolve_circuit_result("vwzio") if graph is not None else None
+    resolved = resolution.circuit if resolution and resolution.status.name == "UNIQUE" else None
+    # B511 runtime/start counters are decoded from observed frames, never actively probed.
+    skipped.add(("vwzio", "runstatsimmersionheaterhwc"))
+    if resolved:
+        skipped.add((resolved.casefold(), "runstatsimmersionheaterhwc"))
     return skipped
 
 
@@ -201,6 +222,8 @@ async def _dump_registers(
     circuit_aliases: dict[str, str | None] | None = None,
     ensure_active: Callable[[], None] | None = None,
     skip_fallback_reads: set[tuple[str, str]] | None = None,
+    current_graph: DeviceGraph | None = None,
+    runtime_definitions: list[str] | None = None,
 ) -> tuple[list[dict], set[str], list[str]]:
     if ensure_active is not None:
         ensure_active()
@@ -210,7 +233,19 @@ async def _dump_registers(
     discovered = _parse_find_lines(raw_lines)
     find_is_usable = getattr(ebus, "last_find_usable", None)
     skip_map_probes = find_is_usable is False
-    fallback_read_skip_keys = skip_fallback_reads or set()
+    fallback_read_skip_keys = set(skip_fallback_reads or ())
+    aliases = dict(circuit_aliases or {})
+    if current_graph is not None and find_is_usable is not False:
+        current_graph = DiscoveryService.build_device_graph(raw_lines)
+        fallback_read_skip_keys.update(_fallback_read_skip_keys(current_graph, runtime_definitions or []))
+        aliases = {
+            alias: (
+                resolution.circuit
+                if (resolution := current_graph.resolve_circuit_result(alias)).status.name == "UNIQUE"
+                else None
+            )
+            for alias in aliases
+        }
     if seen_keys is None:
         seen_keys = set()
     register_list: list[dict] = []
@@ -228,7 +263,6 @@ async def _dump_registers(
         }
         register_list.append(entry)
 
-    aliases = circuit_aliases or {}
     for key, meta in REGISTER_MAP.items():
         if ensure_active is not None:
             ensure_active()
@@ -690,15 +724,13 @@ async def _async_export_discovery_dump_impl(
         logical_circuit: coordinator.resolve_register_circuit(logical_circuit)
         for logical_circuit in ("ctlv2", "hmu", "bai", "vwz", "vwzio")
     }
-    fallback_read_skip_keys = _fallback_read_skip_keys(
-        coordinator._graph,
-        list(coordinator._runtime_definitions.values()),
-    )
+    runtime_definitions = list(coordinator._runtime_definitions.values())
     before_registers, seen, raw_find_lines = await _dump_registers(
         ebus,
         circuit_aliases=aliases,
         ensure_active=ensure_active,
-        skip_fallback_reads=fallback_read_skip_keys,
+        current_graph=coordinator._graph,
+        runtime_definitions=runtime_definitions,
     )
     ensure_active()
 
@@ -744,7 +776,8 @@ async def _async_export_discovery_dump_impl(
             ebus,
             circuit_aliases=aliases,
             ensure_active=ensure_active,
-            skip_fallback_reads=fallback_read_skip_keys,
+            current_graph=coordinator._graph,
+            runtime_definitions=runtime_definitions,
         )
 
     output_dir = hass.config.path(DOMAIN)

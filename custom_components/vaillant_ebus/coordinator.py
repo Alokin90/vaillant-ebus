@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, TypedDict
 
@@ -31,11 +32,16 @@ from .backend.mapping import (
     REGISTER_MAP,
     VWZIO_SW0500_FALLBACK_NAMES,
     b516_date_bytes,
+    hmux0_candidate_circuits,
+    hmux0_fallback_blocked_circuits,
+    hmux0_owner_scan,
+    hmux0_sw0303_owner,
     hmux0_sw0407_circuit,
     is_field_key,
     metadata_circuits,
     multi_field_fields,
     split_multi_field,
+    vwz_station_scan_76_circuit,
     vwzio_sw0500_circuit,
 )
 from .backend.models import (
@@ -334,7 +340,13 @@ def _merge_device_graphs(existing: DeviceGraph, discovered: DeviceGraph) -> Devi
             scan_type=node.scan_type or previous.scan_type,
             scan_sw=node.scan_sw or previous.scan_sw,
             scan_hw=node.scan_hw or previous.scan_hw,
+            scan_address=node.scan_address,
         )
+
+    discovered_circuits = {circuit.casefold() for circuit in discovered.nodes}
+    for circuit, node in tuple(nodes.items()):
+        if circuit.casefold() in {"vwz", "vwzio"} and circuit.casefold() not in discovered_circuits:
+            nodes[circuit] = replace(node, scan_address="")
 
     unavailable_keys = {key.casefold() for key in discovered.placeholder_registers}
     raw_registers = {
@@ -360,6 +372,7 @@ def _merge_device_graphs(existing: DeviceGraph, discovered: DeviceGraph) -> Devi
         raw_registers=raw_registers,
         placeholder_registers=placeholder_registers,
         error_registers=error_registers,
+        scan_identities=discovered.scan_identities,
     )
 
 
@@ -760,7 +773,13 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                     self._started = False
                     return
                 if graph.nodes and not refreshed_graph.nodes:
-                    _LOGGER.warning("Post-definition find returned no graph; retaining the initial discovery graph")
+                    if getattr(ebus, "last_find_usable", None) is not False:
+                        _LOGGER.warning(
+                            "Post-definition find returned no graph nodes; merging the current scan snapshot"
+                        )
+                        graph = _merge_device_graphs(graph, refreshed_graph)
+                    else:
+                        _LOGGER.warning("Post-definition find was unusable; retaining the initial discovery graph")
                     if self._ebusd_repair_pending:
                         await ebus.disconnect()
                         await self._async_mark_ebusd_unreachable(
@@ -1010,6 +1029,17 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 callback()
             except Exception:
                 _LOGGER.warning("Post-discovery callback failed", exc_info=True)
+
+    # Intent: refresh live scan ownership from each usable find before any runtime definition or fallback read.
+    # Why: discovery-ready graphs still need current address evidence when bus identities change.
+    async def _refresh_graph_from_usable_find(self, find_lines: list[str]) -> None:
+        discovered = DiscoveryService.build_device_graph(find_lines)
+        if self.discovery_ready and self._graph is not None:
+            self._graph = _merge_device_graphs(self._graph, discovered)
+        elif discovered.nodes:
+            await self._apply_discovery_graph(discovered, "delayed")
+        elif self._graph is not None:
+            self._graph = _merge_device_graphs(self._graph, discovered)
 
     # Intent: keep at most one delayed discovery callback pending.
     # Why: one bounded retry handles transient find failures without polling continuously.
@@ -1389,17 +1419,14 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                     ",HMUX0 DHW environmental yield this month",
                 ]
             )
-        is_hmux0_0303_0504 = bool(
-            heat_pump
-            and heat_pump.scan_type.upper() == "HMUX0"
-            and heat_pump.scan_sw == "0303"
-            and heat_pump.scan_hw == "0504"
-        )
+        hmux0_owner = hmux0_owner_scan(self._graph)
+        hmux0_sw0303_circuit = hmux0_sw0303_owner(self._graph)
+        is_hmux0_0303_0504 = hmux0_sw0303_circuit is not None
         is_hmux0_b509_0504 = bool(
-            heat_pump
-            and heat_pump.scan_type.upper() == "HMUX0"
-            and heat_pump.scan_sw in {"0302", "0303"}
-            and heat_pump.scan_hw == "0504"
+            hmux0_owner
+            and hmux0_owner[1].complete
+            and hmux0_owner[1].scan_sw in {"0302", "0303"}
+            and hmux0_owner[1].scan_hw == "0504"
         )
         vwzio_circuit = vwzio_sw0500_circuit(self._graph)
         vwzio = next(
@@ -1416,7 +1443,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         # the confirmed 0303/0504 variant, while the B509 monitoring block is
         # evidence-gated for 0302/0504 and 0303/0504. Shared B516 statistics
         # remain available for every discovered HMUX0.
-        if heat_pump and heat_pump.scan_type.upper() == "HMUX0":
+        if hmux0_owner is not None:
             hmu_only_layouts = {"SourceTempInput"}
             if not is_hmux0_0303_0504:
                 hmu_only_layouts.add("Status00")
@@ -1437,6 +1464,14 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             parts = definition.split(",", 3)
             if len(parts) < 3 or not self._graph:
                 return definition
+            hmux0_candidates = {circuit.casefold() for circuit in hmux0_candidate_circuits(self._graph)}
+            hmux0_owner = hmux0_owner_scan(self._graph)
+            if (
+                is_heat_pump_circuit(parts[1])
+                and hmux0_candidates
+                and (hmux0_owner is None or not hmux0_owner[1].complete)
+            ):
+                return None
             if (
                 hmux0_sw0407_owner
                 and parts[1].casefold() == hmux0_sw0407_owner.casefold()
@@ -1453,6 +1488,16 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             if resolution.status != ResolutionStatus.UNIQUE:
                 return None
             resolved = resolution.circuit or parts[1]
+            if (
+                parts[0] == "r"
+                and parts[2].casefold() == "status01"
+                and parts[1].casefold() in {"vwz", "vwzio"}
+                and (
+                    (station_circuit := vwz_station_scan_76_circuit(self._graph)) is None
+                    or resolved.casefold() != station_circuit.casefold()
+                )
+            ):
+                return None
             if resolved == parts[1]:
                 return definition
             parts[1] = resolved
@@ -1496,8 +1541,8 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
 
         defines = [definition for definition in (_resolve_definition_circuit(item) for item in defines) if definition]
         if is_hmux0_0303_0504:
-            assert heat_pump is not None
-            circuit = heat_pump.circuit
+            circuit = hmux0_sw0303_circuit
+            assert circuit is not None
             defines.extend(
                 [
                     f"r,{circuit},RunDataReturnTemp,RunDataReturnTemp,31,08,B509,5402000609"
@@ -1544,6 +1589,12 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             defines.append(
                 f"u,{vwzio.circuit},PowerConsumptionVwz,PowerConsumptionVwz,f1,76,B516,14"
                 ",value,,IGN:1,,,,value,,EXP,1000,kW,Hydraulic station power consumption"
+            )
+            # Intent: decode the captured DHW backup-heater runtime/start counters without polling.
+            # Why: issue #161 correlates the HW0504 delta to two runs; absent data must stay unavailable.
+            defines.append(
+                f"u,{vwzio.circuit},RunStatsImmersionHeaterHwc,RunStatsImmersionHeaterHwc,f1,76,B511,021802"
+                ",ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG"
             )
             # Status01's active field layout is documented for VWZIO HW5103, not this HW0504 scan.
             defines = [
@@ -1961,8 +2012,11 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             for definition in self._runtime_definitions.values()
             if len(parts := definition.split(",", 3)) >= 3 and parts[0].startswith("u")
         }
-        hmux0_sw0407 = hmux0_sw0407_circuit(self._graph)
+        hmux0_blocked_circuits = {circuit.casefold() for circuit in hmux0_fallback_blocked_circuits(self._graph)}
+        hmux0_candidates = {circuit.casefold() for circuit in hmux0_candidate_circuits(self._graph)}
+        hmux0_sw0303 = hmux0_sw0303_owner(self._graph)
         vwzio_sw0500 = vwzio_sw0500_circuit(self._graph)
+        vwz_station_76 = vwz_station_scan_76_circuit(self._graph)
 
         # Intent: add each resolved fallback candidate once.
         # Why: map, passive-definition, and placeholder paths can nominate the same register.
@@ -1973,12 +2027,20 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 return
             if (circuit_key, name_key) in passive_register_keys:
                 return
+            # B511 counters remain passive even if their map fallback metadata changes.
+            if name_key == "runstatsimmersionheaterhwc":
+                return
             if (
-                hmux0_sw0407 is not None
-                and circuit_key == hmux0_sw0407.casefold()
-                and name_key in HMUX0_SW0407_FALLBACK_NAMES
+                name_key == "status01"
+                and circuit_key in {"vwz", "vwzio"}
+                and (vwz_station_76 is None or circuit_key != vwz_station_76.casefold())
             ):
                 return
+            if circuit_key in hmux0_blocked_circuits and name_key in HMUX0_SW0407_FALLBACK_NAMES:
+                return
+            if name_key == "rundatareturntemp" and circuit_key in hmux0_candidates:
+                if hmux0_sw0303 is None or circuit_key != hmux0_sw0303.casefold():
+                    return
             if (
                 vwzio_sw0500 is not None
                 and circuit_key == vwzio_sw0500.casefold()
@@ -2214,10 +2276,6 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             try:
                 now = datetime.now()
                 poll_energy = now - self._last_energy_poll >= ENERGY_POLL_INTERVAL
-                if poll_energy:
-                    await self._define_custom_registers()
-                    if self._stopped or self._unload_requested:
-                        return {"ebusd": await self._async_values_from_registers()}
                 lines = await self.ebus.find_registers()
                 if self._stopped or self._unload_requested:
                     return {"ebusd": await self._async_values_from_registers()}
@@ -2241,13 +2299,28 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                     if self._graph is not None:
                         self._graph.error_registers = error_registers
                     return {"ebusd": await self._async_values_from_registers()}
-                if not self.discovery_ready:
-                    discovered = DiscoveryService.build_device_graph(lines)
-                    if discovered.nodes:
-                        await self._apply_discovery_graph(discovered, "delayed")
+                await self._refresh_graph_from_usable_find(lines)
+                if self._stopped or self._unload_requested or not self.ebus or not self.ebus.is_connected:
+                    return {"ebusd": await self._async_values_from_registers()}
+                if not self._ebusd_connected and self.discovery_ready:
+                    self._ebusd_connected = True
+                if poll_energy:
+                    previous_definitions = self._runtime_definitions.copy()
+                    await self._define_custom_registers()
+                    if self._stopped or self._unload_requested:
+                        return {"ebusd": await self._async_values_from_registers()}
+                    if self._runtime_definitions != previous_definitions:
+                        lines = await self.ebus.find_registers()
+                        if self._stopped or self._unload_requested:
+                            return {"ebusd": await self._async_values_from_registers()}
+                        if getattr(self.ebus, "last_find_usable", None) is False:
+                            _LOGGER.warning(
+                                "Post-definition ebusd find returned no usable rows; skipping active fallback reads"
+                            )
+                            return {"ebusd": await self._async_values_from_registers()}
+                        await self._refresh_graph_from_usable_find(lines)
                         if self._stopped or self._unload_requested or not self.ebus or not self.ebus.is_connected:
                             return {"ebusd": await self._async_values_from_registers()}
-                        self._ebusd_connected = True
                 updated = 0
                 invalid_values: set[str] = set()
                 no_data_values: set[str] = set()

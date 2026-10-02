@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.10.3
+
+### Added
+
+- Add `Hc1SetbackMode` and `OffsetOutsideTemp` controls for the captured CTLV0
+  SW0313/HW9103 controller. The reporter tested the setback-mode mapping; the
+  community dump records the offset value before and after a successful
+  write/read-back.
+- Add passive VWZIO DHW backup-heater runtime and start-count decoding for
+  B511/021802. The SW0500/HW0504 definition uses existing gateway telegrams and
+  does not issue active reads; the captures show the counter advancing across
+  two known heater runs. The shared field layout is also documented on
+  SW0901/SW0902 HW5103 in upstream PR #598.
+
+### Fixed
+
+- Apply the HMUX0 SW0407 fallback blocklist when the current scan identity is
+  incomplete or ambiguous, in both coordinator polling and dump map probes.
+- Keep SW0303-only runtime definitions and `RunDataReturnTemp` fallback behind
+  a current unique SW0303/HW0504 owner, while preserving non-HMUX0 `hmu`
+  fallback behavior.
+- Do not reuse retained HMUX0 scan metadata after a scan-less or ambiguous
+  refresh when deciding runtime definitions or active fallback reads.
+
+### Notes
+
+- The separate HTTP 500 after an ebusd crash is not fixed by this release. Dump
+  export still requires an authoritative discovery graph.
+- BASS3 calendars remain unavailable while timer reads return
+  `ERR: invalid position in decode`.
+- No F34 energy-mapping changes are included.
+
 ## 1.10.2 - 2026-10-02
 
 ### Fixed

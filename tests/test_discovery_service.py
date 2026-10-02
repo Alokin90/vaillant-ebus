@@ -122,7 +122,7 @@ def test_scan_matching_normalizes_prefix_underscores() -> None:
         [("26", "VR71", "0100", "5904")],
         {"vr_71": ["vr_71.Mc1Operation"]},
     )
-    assert result["vr_71"] == ("VR71", "0100", "5904")
+    assert result["vr_71"] == ("VR71", "0100", "5904", "26")
 
 
 # =============================================================================
@@ -149,7 +149,7 @@ def test_scan_matching_exact_normalized_names(circuit: str, scan_type: str) -> N
         [("08", scan_type, "0102", "0304")],
         {circuit: [f"{circuit}.SomeRegister"]},
     )
-    assert result[circuit] == (scan_type, "0102", "0304")
+    assert result[circuit] == (scan_type, "0102", "0304", "08")
 
 
 # Intent: a CTLV3 scan binds to the ctl_v3 circuit through normalization.
@@ -159,7 +159,7 @@ def test_scan_matching_underscore_normalization() -> None:
         [("15", "CTLV3", "0808", "8004")],
         {"ctl_v3": ["ctl_v3.Z1OpMode"]},
     )
-    assert result["ctl_v3"] == ("CTLV3", "0808", "8004")
+    assert result["ctl_v3"] == ("CTLV3", "0808", "8004", "15")
 
 
 # Intent: a numbered scan variant matches its base circuit name.
@@ -179,7 +179,7 @@ def test_scan_matching_family_variant_number_on_scan_only(circuit: str, scan_typ
         [("08", scan_type, "0101", "0202")],
         {circuit: [f"{circuit}.SomeRegister"]},
     )
-    assert result[circuit] == (scan_type, "0101", "0202")
+    assert result[circuit] == (scan_type, "0101", "0202", "08")
 
 
 # Intent: a bare scan type matches a circuit that carries the variant number.
@@ -189,7 +189,7 @@ def test_scan_matching_family_variant_number_on_circuit_only() -> None:
         [("15", "BASV", "0507", "1704")],
         {"basv2": ["basv2.HwcTempDesired"]},
     )
-    assert result["basv2"] == ("BASV", "0507", "1704")
+    assert result["basv2"] == ("BASV", "0507", "1704", "15")
 
 
 # Intent: two sibling circuits of one scan family stay unmatched.
@@ -229,7 +229,7 @@ def test_scan_matching_does_not_reuse_claimed_scan_for_sibling_circuit() -> None
             "hmux0": ["hmux0.RunDataReturnTemp"],
         },
     )
-    assert result["hmu"] == ("HMU00", "0901", "5103")
+    assert result["hmu"] == ("HMU00", "0901", "5103", "08")
     assert "hmux0" not in result
 
 
@@ -253,6 +253,86 @@ def test_scan_only_hmux0_creates_heat_pump_node_for_runtime_bootstrap() -> None:
     assert hmux0.device_type == DeviceType.HEAT_PUMP
     assert hmux0.registers == []
     assert (hmux0.scan_type, hmux0.scan_sw, hmux0.scan_hw) == ("HMUX0", "0303", "0504")
+
+
+# Intent: a unique scan's bus address is retained on the physical graph node and scan snapshot.
+# Why: runtime definitions include a slave address and must not follow a matching device at another address.
+def test_scan_graph_preserves_vwzio_address_and_current_scan_snapshot() -> None:
+    graph = DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "vwzio Status01 = 20;off",
+        ]
+    )
+
+    node = graph.nodes["vwzio"]
+    assert node.scan_address.casefold() == "scan.76"
+    assert [
+        (scan.address.casefold(), scan.scan_type, scan.scan_sw, scan.scan_hw) for scan in graph.scan_identities
+    ] == [("scan.76", "VWZIO", "0500", "0504")]
+
+
+# Intent: repeated identical scan rows at one address retain deterministic address ownership.
+# Why: ebusd may repeat scan output, but duplicates must not clear a valid runtime-definition gate.
+def test_scan_graph_collapses_repeated_vwzio_identity_for_address_ownership() -> None:
+    graph = DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "vwzio Status01 = 20;off",
+        ]
+    )
+
+    assert graph.nodes["vwzio"].scan_address.casefold() == "scan.76"
+    assert len(graph.scan_identities) == 2
+
+
+# Intent: conflicting scan addresses or identities do not assign station ownership to either node.
+# Why: one runtime definition targets a fixed slave address and cannot use ambiguous scan evidence.
+@pytest.mark.parametrize(
+    "scan_lines",
+    (
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "scan.77 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+        ],
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "scan.76 = MF=Vaillant;ID=VWZ00;SW=0522;HW=5103",
+        ],
+    ),
+)
+def test_scan_graph_rejects_vwzio_address_and_identity_conflicts(scan_lines: list[str]) -> None:
+    graph = DiscoveryService.build_device_graph([*scan_lines, "vwzio Status01 = 20;off"])
+
+    assert graph.nodes["vwzio"].scan_address == ""
+    assert len(graph.scan_identities) == 2
+
+
+# Intent: preserve partial address-qualified scan observations without treating them as complete identities.
+# Why: an incomplete conflicting row at scan.76 must invalidate fixed-address runtime definitions.
+def test_scan_graph_preserves_partial_address_qualified_scan_observation() -> None:
+    graph = DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0901;HW=5103",
+            "scan.76 = MF=Vaillant;ID=VWZ00;SW=;HW=",
+            "scan.76 = MF=Vaillant;ID=VWZ00;SW=;HW",
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0500;",
+            "scan.76 = ",
+            "scan.15 = no data stored",
+            "scan.16 = unrelated text",
+            "vwzio Status01 = no data stored",
+        ]
+    )
+
+    assert len(graph.scan_identities) == 5
+    assert graph.scan_identities[1].scan_type == "VWZ00"
+    assert graph.scan_identities[1].complete is False
+    assert graph.scan_identities[2].scan_type == "VWZ00"
+    assert graph.scan_identities[2].complete is False
+    assert graph.scan_identities[3].scan_type == "VWZIO"
+    assert graph.scan_identities[3].complete is False
+    assert graph.scan_identities[4].complete is False
 
 
 # Intent: conflicting HMUX0 scan identities produce no node.
@@ -317,14 +397,14 @@ def test_scan_only_hmux0_keeps_separately_scanned_hmu() -> None:
 # Why: HMU00 and HMUX0 can coexist and must not steal each other's metadata.
 def test_scan_matching_sibling_circuits_each_get_own_scan() -> None:
     result = match_scan_to_circuits(
-        [("08", "HMU00", "0901", "5103"), ("08", "HMUX0", "0303", "0504")],
+        [("08", "HMU00", "0901", "5103"), ("09", "HMUX0", "0303", "0504")],
         {
             "hmu": ["hmu.FlowTemp"],
             "hmux0": ["hmux0.RunDataReturnTemp"],
         },
     )
-    assert result["hmu"] == ("HMU00", "0901", "5103")
-    assert result["hmux0"] == ("HMUX0", "0303", "0504")
+    assert result["hmu"] == ("HMU00", "0901", "5103", "08")
+    assert result["hmux0"] == ("HMUX0", "0303", "0504", "09")
 
 
 # Intent: an unknown scan type binds to no known circuit.
@@ -347,7 +427,7 @@ def test_scan_matching_unknown_scan_type_matches_own_circuit() -> None:
         [("01", "XYZ01", "1234", "5678")],
         {"xyz": ["xyz.Status"]},
     )
-    assert result["xyz"] == ("XYZ01", "1234", "5678")
+    assert result["xyz"] == ("XYZ01", "1234", "5678", "01")
 
 
 # Intent: duplicate identical scan entries resolve deterministically.
@@ -361,8 +441,8 @@ def test_scan_matching_duplicate_identical_entries_are_deterministic() -> None:
     ]
     circuits = {"hmux0": ["hmux0.Status01"], "ctlv3": ["ctlv3.Z1OpMode"]}
     result = match_scan_to_circuits(entries, circuits)
-    assert result["ctlv3"] == ("CTLV3", "0808", "8004")
-    assert result["hmux0"] == ("HMUX0", "0303", "0504")
+    assert result["ctlv3"] == ("CTLV3", "0808", "8004", "15")
+    assert result["hmux0"] == ("HMUX0", "0303", "0504", "08")
 
 
 # Intent: conflicting duplicate metadata stays unmatched in either order.
@@ -386,7 +466,7 @@ def test_scan_matching_compatible_duplicate_metadata_merges_missing_fields() -> 
         {"hmux0": ["hmux0.Status01"]},
     )
 
-    assert result["hmux0"] == ("HMUX0", "0303", "0504")
+    assert result["hmux0"] == ("HMUX0", "0303", "0504", "08")
 
 
 # Intent: ambiguous devices get no parent regardless of node order.
@@ -672,10 +752,10 @@ def test_scan_matching_multiple_unrelated_scans_stay_isolated() -> None:
             "Broadcast": ["Broadcast.Outsidetemp"],
         },
     )
-    assert result["hmux0"] == ("HMUX0", "0303", "0504")
-    assert result["ctlv3"] == ("CTLV3", "0808", "8004")
-    assert result["vwzio"] == ("VWZIO", "0303", "0504")
-    assert result["Broadcast"] == ("NETX2", "4039", "5703")
+    assert result["hmux0"] == ("HMUX0", "0303", "0504", "08")
+    assert result["ctlv3"] == ("CTLV3", "0808", "8004", "15")
+    assert result["vwzio"] == ("VWZIO", "0303", "0504", "76")
+    assert result["Broadcast"] == ("NETX2", "4039", "5703", "f6")
 
 
 # Intent: NETX3 does not bind to Broadcast while NETX2 does.
@@ -769,8 +849,8 @@ def test_parse_scan_metadata_current_ebusd_format() -> None:
     assert result[1:] == ("VWZ00", "0522", "5103")
 
 
-# Intent: reject scan identities with missing positional or keyed metadata values.
-# Why: incomplete identities cannot safely authorize scan-gated hardware behavior.
+# Intent: accept incomplete address-qualified scan observations without promoting them to complete identities.
+# Why: they must remain in the live find snapshot so same-address conflicts can block hardware authorization.
 @pytest.mark.parametrize(
     "line",
     [
@@ -780,12 +860,15 @@ def test_parse_scan_metadata_current_ebusd_format() -> None:
         "scan.15 = Vaillant;CTLV3;0808;",
         "scan.15 = MF=Vaillant;ID=CTLV3;SW=;HW=8004",
         "scan.15 = MF=Vaillant;ID=;SW=0808;HW=8004",
+        "scan.15 = MF=Vaillant;ID=CTLV3;SW=;HW",
     ],
 )
-def test_parse_scan_rejects_incomplete_identity(line: str) -> None:
+def test_parse_scan_preserves_incomplete_identity_as_usable_observation(line: str) -> None:
     assert DiscoveryService._parse_scan(line) is None
-    with pytest.raises(ValueError, match="malformed (scan metadata|register row)"):
-        DISCOVERY.has_usable_find_records([line])
+    observation = DiscoveryService._parse_scan_identity(line)
+    assert observation is not None
+    assert observation.complete is False
+    assert DISCOVERY.has_usable_find_records([line]) is True
 
 
 # Intent: keep unknown but complete scan identities compatible with discovery.

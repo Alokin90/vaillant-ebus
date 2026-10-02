@@ -487,6 +487,15 @@ class ResolutionStatus(Enum):
     FALLBACK = "fallback"
 
 
+@dataclass(frozen=True)
+class ScanIdentity:
+    address: str
+    scan_type: str
+    scan_sw: str
+    scan_hw: str
+    complete: bool = True
+
+
 @dataclass
 class DeviceNode:
     circuit: str
@@ -499,6 +508,7 @@ class DeviceNode:
     scan_type: str = ""
     scan_sw: str = ""
     scan_hw: str = ""
+    scan_address: str = ""
 
 
 @dataclass(frozen=True)
@@ -541,6 +551,7 @@ class DeviceGraph:
     raw_registers: dict[str, str]
     placeholder_registers: set[str]
     error_registers: set[str] = field(default_factory=set)
+    scan_identities: tuple[ScanIdentity, ...] = ()
 
     # Register names that identify the heating/DHW controller. Their source
     # circuit is authoritative even when ebusd exposes them under a logical

@@ -322,7 +322,8 @@ async def test_export_dump_stops_map_probes_after_unload_requested(tmp_path: Pat
     coordinator.ebus = MagicMock()
     coordinator.ebus.is_connected = True
     coordinator.ebus.version = "26.1"
-    coordinator.ebus.find_registers = AsyncMock(return_value=[])
+    coordinator.ebus.find_registers = AsyncMock(return_value=["hmux0 Status01 = off"])
+    coordinator.ebus.last_find_usable = True
     coordinator.ebus.read_register = AsyncMock()
     coordinator._ebusd_connected = True
     coordinator._graph = tc.DeviceGraph(
@@ -332,8 +333,8 @@ async def test_export_dump_stops_map_probes_after_unload_requested(tmp_path: Pat
     )
     original_map = DUMP.REGISTER_MAP
     DUMP.REGISTER_MAP = {
-        "hmu.FirstProbe": MagicMock(enabled=True, writable=False, fallback_read=True),
-        "hmu.SecondProbe": MagicMock(enabled=True, writable=False, fallback_read=True),
+        "hmux0.FirstProbe": MagicMock(enabled=True, writable=False, fallback_read=True),
+        "hmux0.SecondProbe": MagicMock(enabled=True, writable=False, fallback_read=True),
     }
 
     # Intent: flip the teardown flag while the current map probe is suspended.
@@ -1998,6 +1999,265 @@ async def test_dump_registers_skip_issue161_hmux0_fallback_set() -> None:
     )
     other_skip_reads = DUMP._fallback_read_skip_keys(other_graph, [])
     assert not {("hmux0", name.casefold()) for name in expected_names} & other_skip_reads
+
+
+# Intent: dump export does not actively probe the passive HW0504 HWC counter if ebusd rejects its definition.
+# Why: the mapped parent must remain passive even when no runtime definition is available to build a skip list.
+async def test_dump_registers_skip_issue161_vwzio_hwc_counter_without_definition() -> None:
+    fixture = "community/hmux0_issue161_2026-09-28_154109_discovery.yaml"
+    graph = tc.DISCOVERY.DiscoveryService.build_device_graph(tc.load_find_lines(fixture, after=True))
+    assert graph.nodes["vwzio"].scan_sw == "0500"
+    assert graph.nodes["vwzio"].scan_hw == "0504"
+
+    ebus = MagicMock()
+    ebus.find_registers = AsyncMock(return_value=[])
+    ebus.read_register = AsyncMock(return_value=None)
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {
+        "vwzio.RunStatsImmersionHeaterHwc": MagicMock(enabled=False, writable=False, fallback_read=False)
+    }
+    try:
+        registers, _, _ = await DUMP._dump_registers(ebus, circuit_aliases={"vwzio": "vwzio"})
+    finally:
+        DUMP.REGISTER_MAP = original_map
+
+    assert registers == [
+        {
+            "circuit": "vwzio",
+            "name": "RunStatsImmersionHeaterHwc",
+            "fields": ["value"],
+            "values": [None],
+            "writable": False,
+            "has_data": False,
+            "from_map": True,
+            "disabled": True,
+        }
+    ]
+    ebus.read_register.assert_not_awaited()
+
+
+# Intent: dump fallback reads Status01 only from the station currently scanned at 0x76.
+# Why: an alias that resolves to a VWZIO at 0x77 must not probe slave 0x76 through stale metadata.
+async def test_dump_status01_fallback_respects_current_station_address() -> None:
+    wrong_address_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZ00;SW=0522;HW=5103",
+            "scan.77 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+            "vwz Status01 = no data stored",
+            "vwzio Status01 = no data stored",
+        ]
+    )
+    correct_address_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0901;HW=5103",
+            "scan.50 = MF=Vaillant;ID=CTLV2;SW=0514;HW=1104",
+            "scan.50 = MF=Vaillant;ID=CTLV2;SW=0515;HW=1104",
+            "scan.51 = MF=Vaillant;ID=CTLV2;SW=;HW=",
+            "vwzio Status01 = no data stored",
+        ]
+    )
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {
+        "vwz.Status01": MagicMock(enabled=True, writable=False, fallback_read=True),
+        "vwzio.Status01": MagicMock(enabled=True, writable=False, fallback_read=True),
+        "vwzio.RunStatsImmersionHeaterHwc": MagicMock(enabled=True, writable=False, fallback_read=True),
+    }
+    try:
+        wrong_ebus = MagicMock()
+        wrong_ebus.find_registers = AsyncMock(
+            return_value=[
+                "scan.76 = MF=Vaillant;ID=VWZ00;SW=0522;HW=5103",
+                "scan.77 = MF=Vaillant;ID=VWZIO;SW=0500;HW=0504",
+                "vwz Other = live",
+                "vwzio Other = live",
+            ]
+        )
+        wrong_ebus.read_register = AsyncMock(return_value=None)
+        wrong_skips = DUMP._fallback_read_skip_keys(wrong_address_graph, [])
+        await DUMP._dump_registers(
+            wrong_ebus,
+            circuit_aliases={"vwz": "vwz", "vwzio": "vwzio"},
+            skip_fallback_reads=wrong_skips,
+        )
+
+        correct_ebus = MagicMock()
+        correct_ebus.find_registers = AsyncMock(
+            return_value=[
+                "scan.76 = MF=Vaillant;ID=VWZIO;SW=0901;HW=5103",
+                "vwzio Other = live",
+            ]
+        )
+        correct_ebus.read_register = AsyncMock(return_value=None)
+        correct_skips = DUMP._fallback_read_skip_keys(correct_address_graph, [])
+        await DUMP._dump_registers(
+            correct_ebus,
+            circuit_aliases={"vwzio": "vwzio"},
+            skip_fallback_reads=correct_skips,
+        )
+    finally:
+        DUMP.REGISTER_MAP = original_map
+
+    wrong_calls = [call.args[:2] for call in wrong_ebus.read_register.await_args_list]
+    assert ("vwzio", "Status01") not in wrong_calls
+    assert ("vwzio", "RunStatsImmersionHeaterHwc") not in wrong_calls
+    assert ("vwz", "Status01") in wrong_calls
+    correct_calls = [call.args[:2] for call in correct_ebus.read_register.await_args_list]
+    assert ("vwzio", "Status01") in correct_calls
+    assert ("vwzio", "RunStatsImmersionHeaterHwc") not in correct_calls
+
+    partial_address_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        [
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0901;HW=5103",
+            "vwzio Status01 = no data stored",
+        ]
+    )
+    assert DUMP.vwz_station_scan_76_circuit(partial_address_graph) == "vwzio"
+    partial_ebus = MagicMock()
+    partial_ebus.find_registers = AsyncMock(
+        return_value=[
+            "scan.76 = MF=Vaillant;ID=VWZIO;SW=0901;HW=5103",
+            "scan.76 = MF=Vaillant;ID=VWZ00;SW=;HW",
+            "vwzio Other = live",
+        ]
+    )
+    partial_ebus.read_register = AsyncMock(return_value=None)
+    partial_skips = DUMP._fallback_read_skip_keys(partial_address_graph, [])
+    await DUMP._dump_registers(
+        partial_ebus,
+        circuit_aliases={"vwzio": "vwzio"},
+        skip_fallback_reads=partial_skips,
+        current_graph=partial_address_graph,
+        runtime_definitions=[],
+    )
+    assert DUMP.vwz_station_scan_76_circuit(partial_address_graph) == "vwzio"
+    assert ("vwzio", "Status01") not in [call.args[:2] for call in partial_ebus.read_register.await_args_list]
+
+
+# Intent: map aliases in a dump resolve against the current find rather than stale coordinator nodes.
+# Why: an old controller circuit must not receive fallback probes after a different controller is discovered.
+async def test_dump_fallback_alias_uses_current_controller_circuit() -> None:
+    stale_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        ["scan.15 = MF=Vaillant;ID=CTLV2;SW=0514;HW=1104", "ctlv2 Z1OpMode = auto"]
+    )
+    current_find = ["scan.15 = MF=Vaillant;ID=CTLV3;SW=0808;HW=8004", "ctlv3 Z1OpMode = auto"]
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {
+        "ctlv2.Hc1FlowTempCalc": MagicMock(enabled=True, writable=False, fallback_read=True),
+    }
+    ebus = MagicMock()
+    ebus.find_registers = AsyncMock(return_value=current_find)
+    ebus.read_register = AsyncMock(return_value=None)
+    try:
+        await DUMP._dump_registers(
+            ebus,
+            circuit_aliases={"ctlv2": "ctlv2"},
+            current_graph=stale_graph,
+            runtime_definitions=[],
+        )
+    finally:
+        DUMP.REGISTER_MAP = original_map
+
+    calls = [call.args[:2] for call in ebus.read_register.await_args_list]
+    assert ("ctlv3", "Hc1FlowTempCalc") in calls
+    assert ("ctlv2", "Hc1FlowTempCalc") not in calls
+
+
+# Intent: hardware-specific dump blocklists use the firmware in the current raw find.
+# Why: an old coordinator graph must not authorize a fallback prohibited by a newly discovered variant.
+async def test_dump_hmux0_blocklist_uses_current_scan_firmware() -> None:
+    stale_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        ["scan.08 = MF=Vaillant;ID=HMUX0;SW=0303;HW=0504", "hmux0 Status01 = no data stored"]
+    )
+    assert tc.MAPPING.hmux0_sw0407_circuit(stale_graph) is None
+    current_find = [
+        "scan.08 = MF=Vaillant;ID=HMUX0;SW=0407;HW=0504",
+        "hmux0 Status01 = no data stored",
+    ]
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {
+        "hmux0.FlowTemp": MagicMock(enabled=True, writable=False, fallback_read=True),
+    }
+    ebus = MagicMock()
+    ebus.find_registers = AsyncMock(return_value=current_find)
+    ebus.read_register = AsyncMock(return_value=None)
+    try:
+        await DUMP._dump_registers(
+            ebus,
+            circuit_aliases={"hmux0": "hmux0"},
+            skip_fallback_reads=DUMP._fallback_read_skip_keys(stale_graph, []),
+            current_graph=stale_graph,
+            runtime_definitions=[],
+        )
+    finally:
+        DUMP.REGISTER_MAP = original_map
+
+    assert ("hmux0", "FlowTemp") not in [call.args[:2] for call in ebus.read_register.await_args_list]
+
+
+# Intent: incomplete or multi-address HMUX0 scans block dump map probes despite a retained SW0303 skip set.
+# Why: the dump service must apply current scan uncertainty to every active reader, not only coordinator polling.
+async def test_dump_hmux0_incomplete_current_identity_blocks_map_probes() -> None:
+    stale_graph = tc.DISCOVERY.DiscoveryService.build_device_graph(
+        ["scan.08 = MF=Vaillant;ID=HMUX0;SW=0303;HW=0504", "hmux0 Other = live"]
+    )
+    stale_skips = DUMP._fallback_read_skip_keys(stale_graph, [])
+    assert ("hmux0", "status01") not in stale_skips
+    assert ("hmux0", "flowtemp") not in stale_skips
+
+    current_find_cases = (
+        ["scan.08 = Vaillant;HMUX0;0407", "hmux0 Other = live"],
+        [
+            "scan.08 = Vaillant;HMUX0;0407;0504",
+            "scan.09 = Vaillant;HMUX0;0407;0504",
+            "hmux0 Other = live",
+        ],
+    )
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {
+        "hmux0.Status01": MagicMock(enabled=True, writable=False, fallback_read=True),
+        "hmux0.FlowTemp": MagicMock(enabled=True, writable=False, fallback_read=True),
+    }
+    try:
+        for current_find in current_find_cases:
+            ebus = MagicMock()
+            ebus.find_registers = AsyncMock(return_value=current_find)
+            ebus.last_find_usable = True
+            ebus.read_register = AsyncMock(return_value=None)
+
+            await DUMP._dump_registers(
+                ebus,
+                circuit_aliases={"hmux0": "hmux0"},
+                skip_fallback_reads=stale_skips,
+                current_graph=stale_graph,
+                runtime_definitions=[],
+            )
+
+            calls = [call.args[:2] for call in ebus.read_register.await_args_list]
+            assert not any(circuit.casefold() == "hmux0" for circuit, _ in calls), calls
+    finally:
+        DUMP.REGISTER_MAP = original_map
+
+
+# Intent: dump map probes use the same HMUX0 owner gate as coordinator fallback.
+# Why: a partial HMUX0 scan exposed through hmu must not re-enable RunDataReturnTemp probing.
+async def test_dump_partial_hmu_alias_blocks_return_temp_probe() -> None:
+    graph = tc.DISCOVERY.DiscoveryService.build_device_graph(["scan.08 = Vaillant;HMUX0;0303", "hmu Other = live"])
+    ebus = MagicMock()
+    ebus.find_registers = AsyncMock(return_value=["scan.08 = Vaillant;HMUX0;0303", "hmu Other = live"])
+    ebus.last_find_usable = True
+    ebus.read_register = AsyncMock(return_value=None)
+    original_map = DUMP.REGISTER_MAP
+    DUMP.REGISTER_MAP = {"hmu.RunDataReturnTemp": MagicMock(enabled=True, writable=False, fallback_read=True)}
+    try:
+        await DUMP._dump_registers(
+            ebus,
+            circuit_aliases={"hmu": "hmu"},
+            current_graph=graph,
+            runtime_definitions=[],
+        )
+    finally:
+        DUMP.REGISTER_MAP = original_map
+    assert ("hmu", "RunDataReturnTemp") not in [call.args[:2] for call in ebus.read_register.await_args_list]
 
 
 # Intent: resolve host aliases to the socket address used for dump-lock identity.

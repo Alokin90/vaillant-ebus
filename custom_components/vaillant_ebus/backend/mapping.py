@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .models import DeviceGraph, RegisterMeta, is_controller_circuit, is_heat_pump_circuit
+from .models import DeviceGraph, DeviceNode, RegisterMeta, ScanIdentity, is_controller_circuit, is_heat_pump_circuit
 
 HMUX0_SW0407_FALLBACK_BLOCKLIST: frozenset[str] = frozenset(
     {
@@ -67,7 +67,9 @@ HMUX0_SW0407_ENVYIELD_REGISTERS: frozenset[str] = frozenset(
         "HwcEnvYieldMonth",
     }
 )
-VWZIO_SW0500_FALLBACK_BLOCKLIST: frozenset[str] = frozenset({"PowerConsumptionVwz", "Status01"})
+VWZIO_SW0500_FALLBACK_BLOCKLIST: frozenset[str] = frozenset(
+    {"PowerConsumptionVwz", "RunStatsImmersionHeaterHwc", "Status01"}
+)
 VWZIO_SW0500_FALLBACK_NAMES: frozenset[str] = frozenset(item.casefold() for item in VWZIO_SW0500_FALLBACK_BLOCKLIST)
 
 
@@ -83,12 +85,107 @@ def hmux0_sw0407_circuit(graph: DeviceGraph | None) -> str | None:
         and node.scan_type.casefold() == "hmux0"
         and node.scan_sw == "0407"
         and node.scan_hw == "0504"
+        and _has_current_unique_scan_identity(graph, node)
     ]
     return matches[0].circuit if len(matches) == 1 else None
 
 
-# Intent: return the discovered VWZIO circuit only for the target with unverified active Status01 layout.
-# Why: the SW0500/HW0504 evidence justifies passive B516/14 decoding, not importing the HW5103 active probe.
+# Intent: identify HMUX0 circuits whose latest scan evidence cannot authorize fallback polling.
+# Why: retained firmware metadata must not bypass hardware-specific blocklists after incomplete or conflicting scans.
+def hmux0_uncertain_scan_circuits(graph: DeviceGraph | None) -> frozenset[str]:
+    if graph is None:
+        return frozenset()
+    return frozenset(
+        node.circuit
+        for node in graph.nodes.values()
+        if node.device_type.name == "HEAT_PUMP"
+        and (
+            node.scan_type.casefold() == "hmux0"
+            or any(
+                row.scan_type.casefold() == "hmux0"
+                and _normalize_scan_name(node.circuit) == _normalize_scan_name(row.scan_type)
+                for row in graph.scan_identities
+            )
+        )
+        and not _has_current_unique_scan_identity(graph, node)
+    )
+
+
+# Intent: normalize a scan identity or circuit name for generic ownership comparison.
+# Why: incomplete scan rows still need to identify the circuit whose hardware fallback must fail closed.
+def _normalize_scan_name(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+# Intent: share HMUX0 fallback restrictions between coordinator polling and dump map probes.
+# Why: both readers must block confirmed SW0407 and uncertain current scan identities identically.
+def hmux0_fallback_blocked_circuits(graph: DeviceGraph | None) -> frozenset[str]:
+    blocked = set(hmux0_uncertain_scan_circuits(graph))
+    sw0407 = hmux0_sw0407_circuit(graph)
+    if sw0407 is not None:
+        blocked.add(sw0407)
+    return frozenset(blocked)
+
+
+# Intent: identify HMUX0 scan evidence for one physical heat-pump owner, including aliases.
+# Why: ebusd may expose a scanned HMUX0 device through the logical `hmu` circuit.
+def hmux0_owner_scan(graph: DeviceGraph | None) -> tuple[str, ScanIdentity] | None:
+    if graph is None:
+        return None
+    owners = [node for node in graph.nodes.values() if node.device_type.name == "HEAT_PUMP"]
+    scans = [row for row in graph.scan_identities if row.scan_type.casefold() == "hmux0"]
+    identified = [
+        node
+        for node in owners
+        if node.scan_type.casefold() == "hmux0" and _has_current_unique_scan_identity(graph, node)
+    ]
+    if len(scans) == 1 and len(identified) == 1:
+        return identified[0].circuit, scans[0]
+    if not graph.scan_identities and len(owners) == 1 and owners[0].scan_type.casefold() == "hmux0":
+        return None
+    if len(owners) != 1 or len(scans) != 1:
+        return None
+    node = owners[0]
+    scan = scans[0]
+    if node.scan_type and node.scan_type.casefold() != "hmux0":
+        return None
+    return node.circuit, scan
+
+
+# Intent: allow SW0303-only runtime definitions only for current unique evidence.
+# Why: retained node firmware fields cannot authorize a definition after a partial refresh.
+def hmux0_sw0303_owner(graph: DeviceGraph | None) -> str | None:
+    owner_scan = hmux0_owner_scan(graph)
+    if owner_scan is None:
+        return None
+    circuit, scan = owner_scan
+    if not scan.complete or scan.scan_sw != "0303" or scan.scan_hw != "0504":
+        return None
+    if (
+        graph.scan_identities
+        and graph.nodes[circuit].scan_type
+        and not _has_current_unique_scan_identity(graph, graph.nodes[circuit])
+    ):
+        return None
+    return circuit
+
+
+# Intent: identify circuits that may be an HMUX0 owner when identity is incomplete.
+# Why: only these candidates need the HMUX0-specific RunDataReturnTemp fallback restriction.
+def hmux0_candidate_circuits(graph: DeviceGraph | None) -> frozenset[str]:
+    if graph is None:
+        return frozenset()
+    if any(row.scan_type.casefold() == "hmux0" for row in graph.scan_identities):
+        return frozenset(node.circuit for node in graph.nodes.values() if node.device_type.name == "HEAT_PUMP")
+    if not graph.scan_identities:
+        if any(node.scan_type.casefold() == "hmux0" for node in graph.nodes.values()):
+            return frozenset(node.circuit for node in graph.nodes.values() if node.device_type.name == "HEAT_PUMP")
+        return frozenset()
+    return frozenset()
+
+
+# Intent: resolve the discovered circuit only for the VWZIO scan with passive telemetry evidence.
+# Why: SW0500/HW0504 supports captured B516/B511 frames, not HW5103's active Status01 probe.
 def vwzio_sw0500_circuit(graph: DeviceGraph | None) -> str | None:
     if graph is None:
         return None
@@ -99,8 +196,70 @@ def vwzio_sw0500_circuit(graph: DeviceGraph | None) -> str | None:
         and node.scan_type.casefold() == "vwzio"
         and node.scan_sw == "0500"
         and node.scan_hw == "0504"
+        and node.scan_address.casefold() == "scan.76"
+        and _has_current_unique_scan_identity(graph, node)
     ]
     return matches[0].circuit if len(matches) == 1 else None
+
+
+# Intent: return the physical VWZ-family circuit currently scanned at slave 0x76.
+# Why: generic VWZ/VWZIO Status01 definitions embed address 0x76 and cannot follow a matching device elsewhere.
+def vwz_station_scan_76_circuit(graph: DeviceGraph | None) -> str | None:
+    if graph is None:
+        return None
+    matches = [
+        node
+        for node in graph.nodes.values()
+        if node.device_type.name == "PASSIVE_COOLING"
+        and node.scan_type.casefold().startswith("vwz")
+        and node.scan_address.casefold() == "scan.76"
+        and _has_current_unique_scan_identity(graph, node)
+    ]
+    return matches[0].circuit if len(matches) == 1 else None
+
+
+# Intent: verify that a device node still matches exactly one current scan identity.
+# Why: cached node metadata cannot authorize bus traffic after scans conflict or disappear.
+def _has_current_unique_scan_identity(graph: DeviceGraph, node: DeviceNode) -> bool:
+    address = node.scan_address.casefold()
+    scan_type = node.scan_type.casefold()
+    if not address or not scan_type:
+        return False
+    if any(
+        not row.complete and (row.address.casefold() == address or row.scan_type.casefold() == scan_type)
+        for row in graph.scan_identities
+    ):
+        return False
+
+    grouped: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for row in graph.scan_identities:
+        grouped.setdefault((row.address.casefold(), row.scan_type.casefold()), []).append(
+            (row.scan_sw.casefold(), row.scan_hw.casefold())
+        )
+
+    normalized: list[tuple[str, str, str, str]] = []
+    conflicting_addresses: set[str] = set()
+    conflicting_types: set[str] = set()
+    for (row_address, row_type), identities in grouped.items():
+        software = {sw for sw, _ in identities if sw}
+        hardware = {hw for _, hw in identities if hw}
+        if len(software) > 1 or len(hardware) > 1:
+            conflicting_addresses.add(row_address)
+            conflicting_types.add(row_type)
+            continue
+        normalized.append((row_address, row_type, next(iter(software), ""), next(iter(hardware), "")))
+
+    if address in conflicting_addresses or scan_type in conflicting_types:
+        return False
+    matching = [row for row in normalized if row[:2] == (address, scan_type)]
+    if len(matching) != 1:
+        return False
+    if sum(row[1] == scan_type for row in normalized) != 1:
+        return False
+    if sum(row[0] == address for row in normalized) != 1:
+        return False
+    _, _, scan_sw, scan_hw = matching[0]
+    return scan_sw == node.scan_sw.casefold() and scan_hw == node.scan_hw.casefold()
 
 
 # BAI registers that are gas/combustion-specific and do not apply to the
@@ -189,6 +348,7 @@ MULTI_FIELD_FIELDS: dict[str, list[str]] = {
     "hmu.CompressorHwc": ["runtime", "cycles"],
     "hmu.RunStatsCompressorHc": ["runtime", "cycles"],
     "hmu.RunStatsCompressorHwc": ["runtime", "cycles"],
+    "vwzio.RunStatsImmersionHeaterHwc": ["runtime", "cycles"],
     "hmu.RunDataElPowerConsumption": ["value"],
     # v32 gas boiler (ecoTEC plus via VR32, bai.308523.inc + hcmode.inc).
     # Status01/Status02 share the hmu Status01 layout (hcmode.inc B511).
@@ -813,6 +973,30 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         icon="mdi:flash",
         fallback_read=False,
     ),
+    "vwzio.RunStatsImmersionHeaterHwc": RegisterMeta(
+        friendly_name="Backup Heater DHW Stats",
+        icon="mdi:information",
+        entity_category="diagnostic",
+        enabled=False,
+        fallback_read=False,
+    ),
+    "vwzio.RunStatsImmersionHeaterHwc.runtime": RegisterMeta(
+        friendly_name="Backup Heater Runtime (DHW)",
+        device_class="duration",
+        unit="min",
+        state_class="total_increasing",
+        entity_category="diagnostic",
+        entity_type="sensor",
+        fallback_read=False,
+    ),
+    "vwzio.RunStatsImmersionHeaterHwc.cycles": RegisterMeta(
+        friendly_name="Backup Heater Starts (DHW)",
+        icon="mdi:counter",
+        state_class="total_increasing",
+        entity_category="diagnostic",
+        entity_type="sensor",
+        fallback_read=False,
+    ),
     # CSV/find-based electric registers that supplement the runtime-defined
     # b516 counters above (issue #50). Units follow the upstream 08.hmu.tsp
     # definitions: energy is UIN kWh, RunDataElectricPowerConsumption is EXP W,
@@ -1378,6 +1562,14 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         entity_type="select",
         entity_category="config",
     ),
+    "ctlv2.Hc1SetbackMode": RegisterMeta(
+        friendly_name="Setback Mode (HC1)",
+        icon="mdi:thermostat-auto",
+        writable=True,
+        options=["normal", "comfort"],
+        entity_type="select",
+        entity_category="config",
+    ),
     "ctlv2.Hc1RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC1)",
         unit="°C",
@@ -1733,6 +1925,17 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         device_class="temperature",
         unit="°C",
         state_class="measurement",
+    ),
+    "ctlv2.OffsetOutsideTemp": RegisterMeta(
+        friendly_name="Outside Temperature Offset",
+        device_class="temperature",
+        unit="°C",
+        writable=True,
+        min_value=-3,
+        max_value=3,
+        step=0.5,
+        entity_type="number",
+        entity_category="config",
     ),
     "ctlv2.SystemFlowTemp": RegisterMeta(
         friendly_name="System Flow Temperature",
