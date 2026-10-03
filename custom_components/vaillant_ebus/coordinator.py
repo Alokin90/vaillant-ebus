@@ -47,6 +47,7 @@ from .backend.mapping import (
 from .backend.models import (
     CIRCUIT_NAMES,
     COMPRESSOR_STATUS_LABELS,
+    HMUX0_PRECISE_TEMPERATURE_REGISTERS,
     DeviceGraph,
     DeviceNode,
     DeviceType,
@@ -97,8 +98,12 @@ VWZ_STATUS01_FIELDS = (
     "pumpstate,,UCH,0=off;1=on;2=overrun;4=hwc,,"
 )
 
+# Intent: (circuit, register) pairs of the HMUX0 precise temperatures, for poll-time key matching.
+_HMUX0_PRECISE_TEMPERATURE_KEYS = frozenset(("hmux0", name) for name in HMUX0_PRECISE_TEMPERATURE_REGISTERS)
+
 HMUX0_RUNTIME_REGISTERS = frozenset(
     {
+        "RunDataFlowTemp",
         "RunDataReturnTemp",
         "YieldHc",
         "YieldHcDay",
@@ -214,7 +219,12 @@ def _usable_register_value(register_key: str, raw: str | None) -> str | None:
                 return None
         except ValueError:
             return None
-    if register_key.lower() == "hmux0.rundatareturntemp" and not is_valid_hmux0_return_temperature(raw):
+    circuit, _, register_name = register_key.lower().partition(".")
+    if (
+        circuit == "hmux0"
+        and register_name in HMUX0_PRECISE_TEMPERATURE_REGISTERS
+        and not is_valid_hmux0_return_temperature(raw)
+    ):
         return None
     return raw
 
@@ -1545,6 +1555,10 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             assert circuit is not None
             defines.extend(
                 [
+                    # Upstream ebusd-configuration PR #496 (merged) defines flow as ext 0xfc/0x08 next to
+                    # return (0x06/0x09); both decode as tempv (1/16 degC), confirmed live in issue #171.
+                    f"r,{circuit},RunDataFlowTemp,RunDataFlowTemp,31,08,B509,540200fc08"
+                    ",value,,IGN:4,,,,value,,D2C,,°C,HMUX0 flow temperature",
                     f"r,{circuit},RunDataReturnTemp,RunDataReturnTemp,31,08,B509,5402000609"
                     ",value,,IGN:4,,,,value,,D2C,,°C,HMUX0 return temperature",
                     f"r,{circuit},YieldHc,YieldHc,31,08,B51A,05ff3210"
@@ -2038,7 +2052,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 return
             if circuit_key in hmux0_blocked_circuits and name_key in HMUX0_SW0407_FALLBACK_NAMES:
                 return
-            if name_key == "rundatareturntemp" and circuit_key in hmux0_candidates:
+            if name_key in HMUX0_PRECISE_TEMPERATURE_REGISTERS and circuit_key in hmux0_candidates:
                 if hmux0_sw0303 is None or circuit_key != hmux0_sw0303.casefold():
                     return
             if (
@@ -2086,6 +2100,14 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             resolved_circuit = (
                 candidate_circuit if candidate_circuit is not None else self.resolve_register_circuit(map_circuit)
             )
+            # Why: RunDataFlowTemp is only evidenced for the current SW0303/HW0504 HMUX0 owner (issue #171); an
+            # HMUX0 alias key must not trigger an active B509 read on any other heat-pump circuit.
+            if (
+                resolved_circuit is not None
+                and name.casefold() == "rundataflowtemp"
+                and (hmux0_sw0303 is None or resolved_circuit.casefold() != hmux0_sw0303.casefold())
+            ):
+                continue
             if resolved_circuit is not None:
                 _add(resolved_circuit, name)
 
@@ -2340,7 +2362,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                         no_data_values.add(key)
                         if is_ebusd_error_value(line.partition("=")[2]) and key not in batch_with_data:
                             error_values.update((source_key, key))
-                        if key.lower() == "hmux0.rundatareturntemp":
+                        if key.lower().partition(".")[::2] in _HMUX0_PRECISE_TEMPERATURE_KEYS:
                             raw = line.split("=", 1)[1].strip()
                             if not is_no_data_value(raw):
                                 invalid_values.add(key)
