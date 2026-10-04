@@ -18,6 +18,7 @@
     technical protocol values exact; do not simplify those.
 - This repository is release-sensitive. Follow the lifecycle in the global AGENTS.md "Skills & Workflow": `intake → plan → plan-check → execute → validate → review & audit → release-gate`, delegate independent research to subagents, and never self-declare release readiness.
 - For protocol research, prefer the upstream search and dump mining sections below over guessing from register names.
+- **Use the repository tools instead of ad-hoc commands** (details in "Developer Helper Tools"): `tools/validate.py` for every validation run, `tools/fetch_attachments.py` for issue and discussion dumps, `tools/check_translations.py` after touching `translations/`/`strings.json`, `tools/gh_reply.py` for approved GitHub replies, `tools/deploy_ha.sh` for deploys, `tools/search_upstream.sh` for upstream searches. Write a new helper into `tools/` (with tests) when a manual step is repeated a third time.
 
 ## Home Assistant Inspection
 
@@ -486,18 +487,26 @@ does not cover this service.
 ## Release Procedure (what 1.10.5 followed)
 
 1. Plan in `docs/plan-X.Y.Z.md` (git-ignored through `docs/plan-*.md`): inbox scan, evidence table, must/should/could/out.
+   Fetch dumps with `python tools/fetch_attachments.py <issue> --out <scratch>/issueN` (add `--discussion` for a
+   discussion); it reports attachments that are already fixtures.
 2. Branch `release/X.Y.Z`; fixtures first with a failing test, then the fix; classify each register as `confirmed`,
    `strong assumption`, `speculative` or `discovery-only`.
 3. `python tools/version.py bump X.Y.Z`, write the human CHANGELOG section (simple language, honest notes about what is
-   not changed), run the validation block, then independent review and audit.
-4. Deploy to the owner's HA, run the smoke test, record deviations in the plan.
+   not changed), run `python tools/validate.py` (a new failure, a translation rule or a hassfest-style problem must be
+   fixed before review), then independent review and audit.
+4. Deploy with `tools/deploy_ha.sh` (dry-run first with `--dry-run`), restart with the HA-MCP `ha_restart`, run the
+   smoke test, and record deviations in the plan.
 5. Commit, push the branch and open the PR. **Wait for all PR checks (including hassfest and HACS validation) to be
    green before pushing the annotated `vX.Y.Z` tag**: the tag triggers the release job at once, and in 1.10.5 a tag
    pushed early published a release whose hassfest check failed, so the tag had to be moved. Merge only after the
-   owner agrees. Then reply on the affected issues and discussions.
+   owner agrees. Then reply on the affected issues and discussions with `tools/gh_reply.py`, once the owner has
+   approved the texts.
 
 ## GitHub Communication
 
 - Write GitHub issue, discussion, and pull request replies in clear English.
 - Use clean Markdown with complete sentences, correct punctuation, and blank lines between paragraphs.
 - Put lists and distinct points on separate lines. Never post compressed, run-on, or caveman-style prose.
+- Draft each reply as a Markdown file and post it with `python tools/gh_reply.py issue|discussion <n> <file>`
+  (`--dry-run` first). The tool replies under the thread root for discussions and marks the item in
+  `.gh-inbox-state.json`. Post only after the owner approved the text, and after the release it announces exists.

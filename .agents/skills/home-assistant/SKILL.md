@@ -154,6 +154,8 @@ Enable via `configuration.yaml`: `logger.logs.custom_components.<domain>: debug`
 
 ## HA Logs lezen (HA 2026.7+)
 
+**Eerst de HA-MCP gebruiken:** `ha_get_logs(source="error_log", search="vaillant")`. Het Supervisor-token uit de container lezen wordt geblokkeerd en is niet nodig. De volgende curl-voorbeelden zijn alleen een fallback voor de eigenaar zelf.
+
 HA 2026.7+ schrijft geen `home-assistant.log` meer — logs gaan naar container stdout/stderr. Alleen `.1`, `.old`, `.fault` bestaan in `/config/`.
 
 **Core logs via supervisor API** (streaming endpoint, `--max-time` verplicht):

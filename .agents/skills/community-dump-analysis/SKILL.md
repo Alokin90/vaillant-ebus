@@ -19,7 +19,8 @@ Je bent de analyse-spil voor Vaillant eBUS data dumps. Je verzamelt bewijs, geen
 
 ### 1. Vind en download dumps
 
-- Lee's GitHub: `gh issue view <n> --json body,comments` → attachment URLs `https://github.com/user-attachments/files/<id>/<name>` → `curl -sL -o`.
+- Bijlage-URL's staan in `gh issue view <n> --json body,comments` (patroon `https://github.com/user-attachments/files/<id>/<name>`); haal ze met het script hieronder op in plaats van met `curl -o`.
+- Gebruik `python tools/fetch_attachments.py <nr> --out <scratch-map>` (voeg `--discussion` toe voor een discussie). Het script downloadt naar een scratchmap, weigert `tests/fixtures` en meldt bijlagen die al een fixture zijn. Download nooit met `curl -o` over een bestaand pad.
 - Verzamel **alle** bijlages per issue (niet alleen de nieuwste), sorteer op timestamp/updatedAt.
 - Controleer of de dump al als fixture bestaat (`tests/fixtures/community/`); hernoem dan niet dubbel.
 - Lokaal aanwezig: `/config/vaillant_ebus/discovery_dump_*.yaml` (via HA, zie `home-assistant` skill).
@@ -29,6 +30,7 @@ Je bent de analyse-spil voor Vaillant eBUS data dumps. Je verzamelt bewijs, geen
 - Kopieer naar `tests/fixtures/community/<hardware>_<issue>_<timestamp>.yaml` (b.v. `hmux0_issue99_2026-09-13_173740.yaml`).
 - **Knip nooit raw find lines of provenance weg** — test_fixture_integrity guardt dit. Bewaar alle `raw_find_lines` (en `raw_find_lines_after` als die er is).
 - Voeg de fixture toe aan de parametrize-sweep `test_all_fixtures_load` in `tests/test_fake_ebusd.py` (min_registers realistisch per dump).
+- Draai na de wijziging `python tools/validate.py` (op Windows worden de bekende omgevingsfouten uit `tools/known_env_failures.txt` genegeerd).
 - Schrijf een fixture-backed regressietest op de discovered graph (register-waarden, owner-circuit, absent-gedrag).
 
 ### 3. Bouw de evidence-tabel
