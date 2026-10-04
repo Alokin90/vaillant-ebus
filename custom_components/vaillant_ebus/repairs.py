@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.components.repairs import ConfirmRepairFlow, RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
@@ -13,6 +14,15 @@ _LOGGER = logging.getLogger(__name__)
 
 ISSUE_EBUSD_UNREACHABLE = "ebusd_unreachable"
 ISSUE_DETECTION_INCOMPLETE = "detection_incomplete"
+
+
+# Intent: provide the fix flow Home Assistant requires of every repairs platform module.
+# Why: without `async_create_fix_flow` HA logs "Invalid repairs platform" and the fixable issue cannot be resolved.
+async def async_create_fix_flow(
+    hass: HomeAssistant, issue_id: str, data: dict[str, str | int | float | None] | None
+) -> RepairsFlow:
+    """Return a confirm-only flow; the coordinator re-checks ebusd and recreates the issue if it is still down."""
+    return ConfirmRepairFlow()
 
 
 async def async_create_ebusd_unreachable(hass: HomeAssistant) -> None:

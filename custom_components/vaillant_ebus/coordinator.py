@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -35,6 +36,7 @@ from .backend.mapping import (
     hmux0_candidate_circuits,
     hmux0_fallback_blocked_circuits,
     hmux0_owner_scan,
+    hmux0_precise_temperature_owner,
     hmux0_sw0303_owner,
     hmux0_sw0407_circuit,
     is_field_key,
@@ -98,6 +100,9 @@ VWZ_STATUS01_FIELDS = (
     "pumpstate,,UCH,0=off;1=on;2=overrun;4=hwc,,"
 )
 
+# Intent: register names of the HMUX0 precise (1/16 degC) temperatures that need an explicit active read.
+HMUX0_PRECISE_TEMPERATURE_NAMES = ("RunDataFlowTemp", "RunDataReturnTemp")
+
 # Intent: (circuit, register) pairs of the HMUX0 precise temperatures, for poll-time key matching.
 _HMUX0_PRECISE_TEMPERATURE_KEYS = frozenset(("hmux0", name) for name in HMUX0_PRECISE_TEMPERATURE_REGISTERS)
 
@@ -131,25 +136,25 @@ HMUX0_SW0407_PASSIVE_REGISTERS = (
     (
         "RunDataStatuscode",
         "B509",
-        "055402008813",
+        "5402008813",
         f"value,,IGN:4,,,,value,,UIN,{HMUX0_SW0407_STATUS_VALUES},,",
     ),
     (
         "RunDataCompressorSpeed",
         "B509",
-        "055402000d0a",
+        "5402000d0a",
         "value,,IGN:4,,,,value,,EXP,,rps,HMUX0 compressor speed",
     ),
     (
         "RunDataElPowerConsumption",
         "B509",
-        "055402005b0d",
+        "5402005b0d",
         "value,,IGN:4,,,,value,,EXP,,W,HMUX0 electrical power consumption",
     ),
     (
         "RunDataBuildingCPumpPower",
         "B509",
-        "05540200c509",
+        "540200c509",
         "value,,IGN:4,,,,value,,EXP,,%,HMUX0 building circuit pump power",
     ),
     ("KmKreisVerflTemp", "B51A", "05ff3546", "value,,IGN:3,,,,value,,D2C,,°C,temperature"),
@@ -159,6 +164,14 @@ HMUX0_SW0407_PASSIVE_REGISTERS = (
     ("KmKreisKompEinlTemp", "B51A", "05ff3704", "value,,IGN:3,,,,value,,D2C,,°C,temperature"),
     ("KmKreisKompAuslTemp", "B51A", "05ff3705", "value,,IGN:3,,,,value,,D2C,,°C,temperature"),
     ("KmKreisHochdruck", "B51A", "05ff370b", "value,,IGN:3,,,,value,,UIN,10,bar,"),
+    # B516/14 is the gateway's current-power frame; upstream issues #490, #610 and #638 document the layout
+    # (status byte, then EXP) and the fixtures decode 35.92 W and 10.4 W standby values (issue #161).
+    ("PowerConsumptionHmu", "B516", "14", "ign,,IGN:1,,,,value,,EXP,1000,kW,"),
+    # B511 data 1801/1802 (the ebusd id excludes the length byte) are the compressor runtime and start counters
+    # for heating and DHW: upstream 08.hmu.tsp defines the same layout and issue #522 reconciles the minutes
+    # with RunStatsCompressorHours.
+    ("CompressorHc", "B511", "1801", "ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG"),
+    ("CompressorHwc", "B511", "1802", "ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG"),
 )
 
 # Registers whose live (non-sentinel) value marks a discovered zone as
@@ -293,6 +306,15 @@ def _cache_register_is_supported(register_key: str, live_keys: set[str], graph: 
         return False
     circuit = register_key.split(".", 1)[0]
     if _is_stale_legacy_alias(circuit, graph):
+        return False
+    # A cache-only zone/heating-circuit register whose live twin sits under another circuit is the same physical
+    # register cached under a stale label (issue #152: bai.z1RoomHumidity next to the live bass.z1RoomHumidity).
+    name = register_key.split(".", 1)[1] if "." in register_key else ""
+    if re.match(r"^(?:z|hc)\d+", name, re.IGNORECASE) and any(
+        raw_key.casefold().partition(".")[2] == name.casefold()
+        and raw_key.casefold().partition(".")[0] != circuit.casefold()
+        for raw_key in graph.raw_registers
+    ):
         return False
     return True
 
@@ -925,15 +947,29 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 )
             stale_keys = set(stale)
             raw_key_folds = {key.casefold() for key in graph.raw_registers}
-            placeholder_keys = {key for key in graph.placeholder_registers if key.casefold() not in raw_key_folds}
-            non_exposable_placeholder_keys = {
-                key for key in placeholder_keys if _register_disables_fallback_placeholder(key)
+            # Intent: registers the integration defined on this bus keep their entities while ebusd has no value.
+            # Why: `define` can drop the cached value, so a post-define find lists them as no-data placeholders
+            # until the next telegram or read; pruning them disabled user-enabled entities (#175).
+            runtime_defined_key_folds = {
+                f"{parts[1]}.{parts[2]}".casefold()
+                for definition_key in self._runtime_definitions
+                if len(parts := definition_key.split(".", 2)) == 3
             }
+            placeholder_keys = {key for key in graph.placeholder_registers if key.casefold() not in raw_key_folds}
+            pruneable_placeholder_keys = {
+                key for key in placeholder_keys if key.casefold() not in runtime_defined_key_folds
+            }
+            non_exposable_placeholder_keys = {
+                key for key in pruneable_placeholder_keys if _register_disables_fallback_placeholder(key)
+            }
+            pruneable_placeholder_folds = {key.casefold() for key in pruneable_placeholder_keys}
             for entity in self.entities:
                 entity_key = f"{entity.circuit}.{entity.name}"
                 if entity_key.casefold() in {key.casefold() for key in placeholder_keys}:
+                    # A sentinel is unavailable, never the stale cached number, even for runtime-defined registers.
                     entity.raw_value = ""
-                    entity.enabled_by_default = False
+                    if entity_key.casefold() in pruneable_placeholder_folds:
+                        entity.enabled_by_default = False
             stale_entity_key_folds = {
                 key.casefold() for key in (stale_keys - placeholder_keys) | non_exposable_placeholder_keys
             }
@@ -1357,7 +1393,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             # B509/540200/5b0d as diagnostic electrical power in watts.
             # This is additive; absent hardware returns no data.
             "r,hmu,RunDataElPowerConsumption,RunDataElPowerConsumption,31,8,B509"
-            ",055402005b0d,value,,IGN:4,,,,value,,EXP,,W,"
+            ",5402005b0d,value,,IGN:4,,,,value,,EXP,,W,"
             "HMUX0 electrical power consumption",
             "r5,ctlv2,ManualCoolingStartDate,ManualCoolingStartDate,31,15,B524"
             ",02000000da00,value,,IGN:4,,,,value,,HDA:3",
@@ -1586,9 +1622,9 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             circuit = heat_pump.circuit
             defines.extend(
                 [
-                    f"r,{circuit},RunDataCompressorSpeed,RunDataCompressorSpeed,31,08,B509,055402000d0a"
+                    f"r,{circuit},RunDataCompressorSpeed,RunDataCompressorSpeed,31,08,B509,5402000d0a"
                     ",value,,IGN:4,,,,value,,EXP,,rps,HMUX0 compressor speed",
-                    f"r,{circuit},RunDataBuildingCPumpPower,RunDataBuildingCPumpPower,31,08,B509,05540200c509"
+                    f"r,{circuit},RunDataBuildingCPumpPower,RunDataBuildingCPumpPower,31,08,B509,540200c509"
                     ",value,,IGN:4,,,,value,,EXP,,%,HMUX0 building circuit pump power",
                 ]
             )
@@ -1607,8 +1643,15 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             # Intent: decode the captured DHW backup-heater runtime/start counters without polling.
             # Why: issue #161 correlates the HW0504 delta to two runs; absent data must stay unavailable.
             defines.append(
-                f"u,{vwzio.circuit},RunStatsImmersionHeaterHwc,RunStatsImmersionHeaterHwc,f1,76,B511,021802"
+                f"u,{vwzio.circuit},RunStatsImmersionHeaterHwc,RunStatsImmersionHeaterHwc,f1,76,B511,1802"
                 ",ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG"
+            )
+            # Intent: decode the captured backup-heater DHW heat total (B516 source 0x49, usage 04) without polling.
+            # Why: strong assumption from the issue #161 capture (6487 Wh against 106 min of heater runtime);
+            # the layout matches the Hwc counters, and the entity is disabled by default and unavailable when absent.
+            defines.append(
+                f"u,{vwzio.circuit},HeaterYieldHwcTotal,HeaterYieldHwcTotal,f1,76,B516,1000ffff49040000"
+                ",ign,,IGN:7,,,,value,,EXP,,Wh,Backup heater DHW heat total (assumed)"
             )
             # Status01's active field layout is documented for VWZIO HW5103, not this HW0504 scan.
             defines = [
@@ -2028,7 +2071,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         }
         hmux0_blocked_circuits = {circuit.casefold() for circuit in hmux0_fallback_blocked_circuits(self._graph)}
         hmux0_candidates = {circuit.casefold() for circuit in hmux0_candidate_circuits(self._graph)}
-        hmux0_sw0303 = hmux0_sw0303_owner(self._graph)
+        hmux0_precise_temperature = hmux0_precise_temperature_owner(self._graph)
         vwzio_sw0500 = vwzio_sw0500_circuit(self._graph)
         vwz_station_76 = vwz_station_scan_76_circuit(self._graph)
 
@@ -2053,7 +2096,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             if circuit_key in hmux0_blocked_circuits and name_key in HMUX0_SW0407_FALLBACK_NAMES:
                 return
             if name_key in HMUX0_PRECISE_TEMPERATURE_REGISTERS and circuit_key in hmux0_candidates:
-                if hmux0_sw0303 is None or circuit_key != hmux0_sw0303.casefold():
+                if hmux0_precise_temperature is None or circuit_key != hmux0_precise_temperature.casefold():
                     return
             if (
                 vwzio_sw0500 is not None
@@ -2078,6 +2121,17 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 ):
                     _add(circuit, name)
 
+        # The HMUX0 precise temperatures are plain-`r` messages that ebusd never polls. Their REGISTER_MAP key
+        # matches the graph key, so the map-driven pass below skips them once `find` lists them; read them
+        # explicitly for the evidenced firmware so the value follows the heat pump instead of ebusd's cache (#171).
+        if hmux0_precise_temperature is not None and self._graph:
+            discovered_keys = {
+                key.casefold() for key in (*self._graph.raw_registers, *self._graph.placeholder_registers)
+            }
+            for name in HMUX0_PRECISE_TEMPERATURE_NAMES:
+                if f"{hmux0_precise_temperature}.{name}".casefold() in discovered_keys:
+                    _add(hmux0_precise_temperature, name)
+
         # Map-driven reads: registers with metadata not yet in the graph.
         graph_key_folds = {key.casefold() for key in graph_keys}
         for key in REGISTER_MAP:
@@ -2100,12 +2154,15 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             resolved_circuit = (
                 candidate_circuit if candidate_circuit is not None else self.resolve_register_circuit(map_circuit)
             )
-            # Why: RunDataFlowTemp is only evidenced for the current SW0303/HW0504 HMUX0 owner (issue #171); an
+            # Why: RunDataFlowTemp is only evidenced for the current SW0303/SW0406 HW0504 HMUX0 owner (issue #171); an
             # HMUX0 alias key must not trigger an active B509 read on any other heat-pump circuit.
             if (
                 resolved_circuit is not None
                 and name.casefold() == "rundataflowtemp"
-                and (hmux0_sw0303 is None or resolved_circuit.casefold() != hmux0_sw0303.casefold())
+                and (
+                    hmux0_precise_temperature is None
+                    or resolved_circuit.casefold() != hmux0_precise_temperature.casefold()
+                )
             ):
                 continue
             if resolved_circuit is not None:

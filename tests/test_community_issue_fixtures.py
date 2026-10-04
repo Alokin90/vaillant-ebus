@@ -441,9 +441,7 @@ def test_issue161_vwzio_hwc_runtime_frames_match_heater_cycles() -> None:
 def test_issue598_vwzio_hw5103_counter_metadata_is_graph_driven() -> None:
     from vaillant_ebus.backend.mapping import REGISTER_MAP
 
-    evidence = yaml.safe_load(
-        (FIXTURES_DIR / "community/vwzio_hw5103_pr598_b511_stats.yaml").read_text()
-    )
+    evidence = yaml.safe_load((FIXTURES_DIR / "community/vwzio_hw5103_pr598_b511_stats.yaml").read_text())
     assert evidence["source"] == "https://github.com/john30/ebusd-configuration/pull/598"
 
     for system in evidence["systems"].values():
@@ -730,3 +728,69 @@ def test_issue171_hmux0_run_data_flow_temperature_becomes_precise_sensor() -> No
     assert flow.meta.unit == "°C"
     assert flow.enabled_by_default is True
     assert entities["vwzio.Status01.temp"].meta.friendly_name == "Flow Temperature"
+
+
+# Intent: rebuild the find lines the coordinator seeds from the F34 issue #152 register cache.
+# Why: the HC3 entities came from cache seeding, which keeps static defaults of unused circuits.
+def _f34_cache_find_lines() -> list[str]:
+    import json
+
+    from tests.fake_ebusd import FIXTURES_DIR
+
+    cache = json.loads((FIXTURES_DIR / "community/f34_issue152_2026-10-02_register_cache.json").read_text("utf-8"))
+    lines = []
+    for cache_key, value in cache.items():
+        parts = cache_key.split(".")
+        if len(parts) == 3 and parts[2] == "value":
+            lines.append(f"{parts[0]} {parts[1]} = {value}")
+    return lines
+
+
+# Intent: heating circuits the controller reports as `inactive` create no entities except the circuit type itself.
+# Why: issue #152 - the reporter has no HC3, but its static heat curve and min flow defaults created seven entities.
+def test_issue152_inactive_heating_circuit_creates_no_entities_but_keeps_circuit_type() -> None:
+    entities = {
+        entity.key: entity
+        for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(_f34_cache_find_lines()))
+    }
+
+    assert not [key for key in entities if ".Hc3" in key and not key.startswith("bass.Hc3CircuitType")]
+    assert "bass.Hc3CircuitType.value" in entities
+    assert "bass.Hc2HeatCurve.value" in entities
+    assert "bass.Hc1FlowTemp.value" in entities
+
+
+# Intent: without an `inactive` circuit type the same static HC3 registers are still exposed.
+# Why: an unreadable or missing type (the F34 Hc1CircuitType returns an error) must never hide a circuit.
+def test_issue152_heating_circuit_without_inactive_type_keeps_entities() -> None:
+    lines = [line for line in _f34_cache_find_lines() if "Hc3CircuitType" not in line]
+    entities = {entity.key for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(lines))}
+
+    assert "bass.Hc3HeatCurve.value" in entities
+
+
+# Intent: the F34 boiler stage-1 energy counters claim no kWh unit and are disabled by default.
+# Why: issue #152 - 40960195 "kWh" is impossible; the unit is unproven, so it must not feed the Energy dashboard.
+def test_issue152_boiler_stage_energy_counters_are_raw_and_disabled_by_default() -> None:
+    entities = {
+        entity.key: entity
+        for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(_f34_cache_find_lines()))
+    }
+
+    for key in ("bai.PrEnergySumHc1.value", "bai.PrEnergySumHwc1.value"):
+        entity = entities[key]
+        assert (entity.meta.unit, entity.meta.device_class) == ("", "")
+        assert entity.enabled_by_default is False
+    assert entities["bai.PrEnergySumHc1.value"].raw_value == "40960195"
+
+
+# Intent: an E7000 system manager without a loaded ebusd configuration yields no controller device or climate source.
+# Why: discussion #31 - ebusd's `next` tree has no 15.e7000, so there are no zone registers for a climate entity.
+def test_discussion31_e7000_without_config_creates_no_controller_entities() -> None:
+    graph = DiscoveryService.build_device_graph(
+        load_find_lines("community/hmu_e7000_discussion31_2026-10-04_113747_discovery.yaml")
+    )
+    entities = EntityFactoryService().generate(graph)
+
+    assert not [entity for entity in entities if entity.name.lower().startswith(("z1", "hc1"))]
+    assert graph.heating_controller_result().node is None

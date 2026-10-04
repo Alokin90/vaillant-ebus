@@ -178,6 +178,15 @@ def _determine_enabled_by_default(
     return False
 
 
+# Intent: report whether the controller itself declares heating circuit N unused.
+# Why: ebusd keeps static defaults (heat curve, min flow) for unused circuits, so they look live (issue #152);
+# only the controller's own `HcNCircuitType = inactive` is evidence, and an unreadable type must never hide a circuit.
+def _heating_circuit_inactive(graph: DeviceGraph, circuit: str, number: str) -> bool:
+    expected = f"{circuit}.Hc{number}CircuitType".casefold()
+    value = next((raw for key, raw in graph.raw_registers.items() if key.casefold() == expected), None)
+    return value is not None and value.strip().casefold() == "inactive"
+
+
 def _is_eloblock(graph: DeviceGraph) -> bool:
     """Identify the confirmed eloBLOCK VE 28 BAI hardware."""
     for key, raw in graph.raw_registers.items():
@@ -360,6 +369,14 @@ class EntityFactoryService:
                     and (zone_node := graph.nodes.get(f"z{zone_match.group(1)}")) is not None
                     and not zone_node.has_data
                     and name_lower != "hc1roomtempswitchon"
+                ):
+                    continue
+                inactive_match = re.match(r"^Hc(\d+)", name, re.IGNORECASE)
+                if (
+                    inactive_match
+                    and override.get("enabled") is not True
+                    and not name_lower.endswith("circuittype")
+                    and _heating_circuit_inactive(graph, circuit, inactive_match.group(1))
                 ):
                     continue
                 if (

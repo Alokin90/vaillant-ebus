@@ -28,7 +28,7 @@ from .backend.mapping import (
     VWZIO_SW0500_FALLBACK_NAMES,
     hmux0_candidate_circuits,
     hmux0_fallback_blocked_circuits,
-    hmux0_sw0303_owner,
+    hmux0_precise_temperature_owner,
     is_field_key,
     vwz_station_scan_76_circuit,
     vwzio_sw0500_circuit,
@@ -39,7 +39,8 @@ from .coordinator import VaillantCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 GRAB_CONNECT_TIMEOUT = 5
-GRAB_MAX_RESPONSE_LINES = 10_000
+# ebusd 2.1+ grabs daemon-wide, so `grab result all` grows with uptime; 10_000 lines was exceeded after a day.
+GRAB_MAX_RESPONSE_LINES = 100_000
 GRAB_RESPONSE_TIMEOUT = 30
 GRAB_COUNT_DELTA_LIMITATION = (
     "results keep the latest payload per key; identical visible rows are coalesced by summed counts; "
@@ -146,9 +147,9 @@ def _fallback_read_skip_keys(graph: DeviceGraph | None, runtime_definitions: lis
 
     for hmux0 in hmux0_fallback_blocked_circuits(graph):
         skipped.update((hmux0.casefold(), name) for name in HMUX0_SW0407_FALLBACK_NAMES)
-    hmux0_sw0303 = hmux0_sw0303_owner(graph)
+    hmux0_precise = hmux0_precise_temperature_owner(graph)
     for circuit in hmux0_candidate_circuits(graph):
-        if hmux0_sw0303 is None or circuit.casefold() != hmux0_sw0303.casefold():
+        if hmux0_precise is None or circuit.casefold() != hmux0_precise.casefold():
             skipped.update((circuit.casefold(), name) for name in HMUX0_PRECISE_TEMPERATURE_REGISTERS)
     vwzio = vwzio_sw0500_circuit(graph)
     if vwzio is not None:

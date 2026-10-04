@@ -181,3 +181,29 @@ def test_b516_cooling_register_entities() -> None:
     assert by_key["hmu.LiveMonitorCurrentConsumedPower.value"].meta.device_class == "power"
     assert by_key["hmu.LiveMonitorCurrentConsumedPower.value"].meta.unit == "kW"
     assert by_key["hmu.RunDataCompressorSpeed.value"].meta.unit == "rps"
+
+
+# Intent: the six HMUX0 Hc/Hwc environmental-yield counters keep Wh, energy class and total_increasing.
+# Why: issues #161/#175 - the counters must be usable for long-term statistics and the Energy dashboard.
+def test_hmux0_env_yield_counters_are_total_increasing_energy_sensors() -> None:
+    names = (
+        "HcEnvYieldTotal",
+        "HcEnvYieldDay",
+        "HcEnvYieldMonth",
+        "HwcEnvYieldTotal",
+        "HwcEnvYieldDay",
+        "HwcEnvYieldMonth",
+    )
+    lines = ["scan.08 = Vaillant;HMUX0;0407;0504", *[f"hmux0 {name} = 44225" for name in names]]
+    entities = {
+        entity.key: entity for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(lines))
+    }
+
+    for name in names:
+        entity = entities[f"hmux0.{name}.value"]
+        assert (entity.meta.device_class, entity.meta.unit, entity.meta.state_class) == (
+            "energy",
+            "Wh",
+            "total_increasing",
+        )
+        assert entity.enabled_by_default is True

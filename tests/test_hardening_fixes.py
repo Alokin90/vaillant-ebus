@@ -648,6 +648,23 @@ async def test_grab_cmd_fails_when_response_exceeds_line_ceiling(monkeypatch: py
     writer.wait_closed.assert_awaited_once()
 
 
+# Intent: a long daemon-wide `grab result all` response below the ceiling is returned complete.
+# Why: ebusd 2.1+ grabs continuously; a 12000-line result (over the old 10000 limit) made the owner's dump skip it.
+async def test_grab_cmd_accepts_response_longer_than_the_old_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"".join(f"telegram-{index}".encode() + b"\n" for index in range(12_000)) + b"\n")
+    reader.feed_eof()
+    writer = MagicMock()
+    writer.drain = AsyncMock()
+    writer.wait_closed = AsyncMock()
+    monkeypatch.setattr(DUMP.asyncio, "open_connection", AsyncMock(return_value=(reader, writer)))
+
+    lines = await DUMP._grab_cmd("127.0.0.1", 8888, "grab result all")
+
+    assert len(lines) == 12_000
+    assert DUMP.GRAB_MAX_RESPONSE_LINES >= 100_000
+
+
 # Intent: classify a single over-limit TCP line as an incomplete capture response.
 # Why: StreamReader.readline can raise ValueError before the total-line ceiling is reached.
 async def test_grab_cmd_converts_oversized_single_line_to_capture_error(monkeypatch: pytest.MonkeyPatch) -> None:
