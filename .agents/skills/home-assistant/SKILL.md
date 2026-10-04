@@ -2,7 +2,7 @@
 name: home-assistant
 description: "Use when developing, testing, or deploying Home Assistant custom_components via SSH/SMB on a local HA instance. Covers SSH access, HA API, entity registry, supervisor ops, deploy workflow, and ebusd TCP interaction."
 triggers:
-  # HA specifiek (geen algemene programmeertermen)
+  # HA-specific (no general programming terms)
   - home assistant
   - homeassistant
   - HASS
@@ -21,7 +21,7 @@ triggers:
   - supervisor token
   - SUPERVISOR_TOKEN
   - HA addon
-  # Deploy naar HA
+  # Deploy to HA
   - deploy to HA
   - upload to HA
   - push branch to HA
@@ -66,7 +66,7 @@ triggers:
   - ebus uitlezen
   - ebus debugging
   - ebus bus
-  # Vaillant / warmtepomp
+  # Vaillant / heat pump
   - compressor power
   - warmtepomp register
   - heat pump register
@@ -104,7 +104,7 @@ When reporting HA findings in GitHub issues or discussions, use clear English an
 Write complete sentences with correct punctuation, separate paragraphs with blank lines, and put
 lists or distinct points on separate lines. Never post compressed or run-on prose.
 
-SSH/SMB workflow voor custom_components op lokale HA instance. Inclusief ebusd TCP interactie voor Vaillant warmtepomp debuggen.
+SSH/SMB workflow for custom_components on a local HA instance. Includes ebusd TCP interaction for debugging the Vaillant heat pump.
 
 ## Deploy workflow
 
@@ -120,7 +120,7 @@ SSH/SMB workflow voor custom_components op lokale HA instance. Inclusief ebusd T
 
 The script loads credentials from `.env`, builds a clean zip (excludes `__pycache__`), uploads via SMB, unzips on HA, and optionally restarts HA.
 
-`tools/deploy_ha.sh` en `tools/deploy_ha.py` zijn ingecheckt (zonder geheimen). Windows-opzet (SSH add-on zonder SFTP, `/config` van root, `sudo -n`, back-up in `/config/.deploy_backups/`): zie AGENTS.md "Deploying To The Owner's Home Assistant". Herstart met HA-MCP `ha_restart`.
+`tools/deploy_ha.sh` and `tools/deploy_ha.py` are checked in (without secrets). Windows setup (SSH add-on without SFTP, `/config` owned by root, `sudo -n`, backup in `/config/.deploy_backups/`): see AGENTS.md "Deploying To The Owner's Home Assistant". Restart with HA-MCP `ha_restart`.
 
 **If `tools/deploy_ha.sh` doesn't exist**, create it at `<repo>/tools/deploy_ha.sh` with:
 1. Load HA_HOST/HA_USER/HA_PASSWORD/HA_SSH_PASSWORD from `.env`
@@ -130,9 +130,9 @@ The script loads credentials from `.env`, builds a clean zip (excludes `__pycach
 5. SSH unzip (replace all files)
 6. Restart HA via supervisor API
 
-**CRITICAL: `__pycache__/`** — `rm -rf *` en `rm -f *.py` verwijderen hidden dirs niet. Altijd `rm -rf /config/custom_components/<domain>/` (de hele directory) gebruiken ipv selectief verwijderen.
+**CRITICAL: `__pycache__/`** — `rm -rf *` and `rm -f *.py` do not remove hidden dirs. Always use `rm -rf /config/custom_components/<domain>/` (the whole directory) instead of deleting selectively.
 
-## Entity registry nuke (stop HA eerst!)
+## Entity registry nuke (stop HA first!)
 
 ```python
 import json
@@ -144,21 +144,21 @@ with open('/config/.storage/core.entity_registry', 'w') as f:
     json.dump(d, f, indent=2)
 ```
 
-**Sequence:** stop HA → nuke → verwijder `.before-*` / `.before_prune` backups → start HA.
+**Sequence:** stop HA → nuke → delete `.before-*` / `.before_prune` backups → start HA.
 
 ## Debug pattern
 
-`_LOGGER.warning("DEBUG: %s = %s", key, value)` in deployed code. Verwijder voor merge.
+`_LOGGER.warning("DEBUG: %s = %s", key, value)` in deployed code. Remove before merge.
 
-Enable via `configuration.yaml`: `logger.logs.custom_components.<domain>: debug` of HA UI > Logs.
+Enable via `configuration.yaml`: `logger.logs.custom_components.<domain>: debug` or HA UI > Logs.
 
-## HA Logs lezen (HA 2026.7+)
+## Reading HA logs (HA 2026.7+)
 
-**Eerst de HA-MCP gebruiken:** `ha_get_logs(source="error_log", search="vaillant")`. Het Supervisor-token uit de container lezen wordt geblokkeerd en is niet nodig. De volgende curl-voorbeelden zijn alleen een fallback voor de eigenaar zelf.
+**Use the HA-MCP first:** `ha_get_logs(source="error_log", search="vaillant")`. Reading the Supervisor token from the container is blocked and not needed. The following curl examples are only a fallback for the owner themselves.
 
-HA 2026.7+ schrijft geen `home-assistant.log` meer — logs gaan naar container stdout/stderr. Alleen `.1`, `.old`, `.fault` bestaan in `/config/`.
+HA 2026.7+ no longer writes `home-assistant.log` — logs go to container stdout/stderr. Only `.1`, `.old`, `.fault` exist in `/config/`.
 
-**Core logs via supervisor API** (streaming endpoint, `--max-time` verplicht):
+**Core logs via supervisor API** (streaming endpoint, `--max-time` required):
 ```bash
 TOKEN=$(ssh ... "cat /run/s6/container_environment/SUPERVISOR_TOKEN")
 curl -s --max-time 5 http://supervisor/core/logs \
@@ -166,18 +166,18 @@ curl -s --max-time 5 http://supervisor/core/logs \
   | grep -i "vaillant\|ebus\|error\|traceback" | tail -40
 ```
 
-**Filter op jouw domain** tijdens development:
+**Filter on your domain** during development:
 ```bash
 curl -s --max-time 10 http://supervisor/core/logs \
   -H "Authorization: Bearer $TOKEN" \
   | grep -i "vaillant_ebus\|coordinator\|entity_factory\|custom_components"
 ```
 
-**Andere endpoints die niet werken** (404 in 2026.7+):
+**Other endpoints that don't work** (404 in 2026.7+):
 - `http://supervisor/core/api/logs` ✗
 - `http://supervisor/core/api/error_log` ✗
 - `journalctl` via SSH addon ✗ (protection mode blocked)
-- `/config/home-assistant.log` ✗ (bestaat niet als actief log)
+- `/config/home-assistant.log` ✗ (does not exist as an active log)
 
 ## Credentials (.env)
 
@@ -191,7 +191,7 @@ curl -s --max-time 10 http://supervisor/core/logs \
 
 ### Basics
 
-ebusd draait als HA addon, TCP poort 8888 (gemapped naar host). Eigen Python script via SSH voor interactie.
+ebusd runs as an HA addon, TCP port 8888 (mapped to the host). Use your own Python script via SSH for interaction.
 
 **Connect + read** (Python):
 ```python
@@ -219,14 +219,14 @@ PYEOF
 
 ### Register naming
 
-CRITICAL: ebusd gebruikt **spatie** tussen circuit en naam, NIET punt.
+CRITICAL: ebusd uses a **space** between circuit and name, NOT a dot.
 
-| Correct | Fout |
+| Correct | Wrong |
 |---------|------|
 | `r -c hmu CurrentConsumedPower` | `r hmu.CurrentConsumedPower` ✗ |
 | `r -c hmu RunDataStatuscode` | `r hmu.RunDataStatuscode` ✗ |
 
-De custom_component backend gebruikt zelf de juiste syntax (`read -c {circuit} {name}`). Het probleem zit alleen in handmatige ebusd queries.
+The custom_component backend itself uses the correct syntax (`read -c {circuit} {name}`). The problem only occurs in manual ebusd queries.
 
 ### Key commands
 
@@ -238,12 +238,12 @@ De custom_component backend gebruikt zelf de juiste syntax (`read -c {circuit} {
 | `find -v -c CIRCUIT` | Verbose with field names | `find -v -c hmu` |
 | `i` | Info (version, CSV, slaves) | `i` |
 | `s` / `state` | Bus state | `s` |
-| `define -r "DEF"` | Define custom register | zie Define section |
+| `define -r "DEF"` | Define custom register | see Define section |
 | `h` / `help` | Help | `h` |
 
 ### Poll loop
 
-Monitor registers in real-time:
+Monitor registers in real time:
 ```python
 import socket, time
 
@@ -267,26 +267,26 @@ while True:
     time.sleep(30)
 ```
 
-Let op: `%H:%M:%S` in f-string geeft SyntaxError. Gebruik losse variable of `strftime` buiten de f-string.
+Note: `%H:%M:%S` inside an f-string gives a SyntaxError. Use a separate variable or call `strftime` outside the f-string.
 
 ### Multi-field registers
 
-`find -v` toont veldnamen. Voorbeeld `Status01`:
+`find -v` shows field names. Example `Status01`:
 ```
 hmu Status01 = temp=58.5;temp_1=53.5;pumpstate=hwc
 ```
 
-Lees specifiek veld: `r -c hmu Status01 temp`
+Read a specific field: `r -c hmu Status01 temp`
 
-Bekende multi-field registers:
+Known multi-field registers:
 - `Status01` — temp (flow?), temp_1 (return?), temp_2..4, pumpstate (hwc/hc)
 - `SetMode` — hcmode, flowtempdesired, hwctempdesired, hwcflowtempdesired, disablehc, etc.
 
 ### Define custom registers
 
-`define -r "DEFINITION"` werkt omdat addon `--enabledefine` heeft.
+`define -r "DEFINITION"` works because the addon has `--enabledefine`.
 
-**r5 def voor z1RoomHumidity** (werkt):
+**r5 def for z1RoomHumidity** (works):
 ```
 r5,ctlv2,z1RoomHumidity,z1RoomHumidity,31,15,B524,020003002800
 ,value,,IGN:4,,,,value,,EXP,,%,z1 Room Humidity
@@ -294,61 +294,61 @@ r5,ctlv2,z1RoomHumidity,z1RoomHumidity,31,15,B524,020003002800
 
 Key: type `r5` (zone read), QQ=31 (ebusd), ZZ=15 (CTLV2), message B524, field ID `020003002800`.
 
-**B516 sub 14 is wel het vermogen (HMUX0 SW0407 en VWZIO SW0500, 1.10.5).** De gateway pollt `f108b5160114` (slave 08) en `f176b5160114` (slave 76): antwoord = status-byte + float32 W. Upstream ebusd-configuration #490, #610 en #638 documenteren dezelfde layout (`ign,IGN:1` + `EXP`). Op oudere HMU-firmware (HW5103 < SW0901) geeft de actieve read niets/`00`; daarom is `PowerConsumptionHmu` alleen een *passieve* definitie op HMUX0 SW0407. De oudere remark dat B516 alleen fields 10-13 heeft geldt voor de PrEnergy-statistiek (`1000ffff...`), niet voor sub 14.
+**B516 sub 14 is the power (HMUX0 SW0407 and VWZIO SW0500, 1.10.5).** The gateway polls `f108b5160114` (slave 08) and `f176b5160114` (slave 76): reply = status byte + float32 W. Upstream ebusd-configuration #490, #610 and #638 document the same layout (`ign,IGN:1` + `EXP`). On older HMU firmware (HW5103 < SW0901) the active read returns nothing/`00`; therefore `PowerConsumptionHmu` is only a *passive* definition on HMUX0 SW0407. The older remark that B516 only has fields 10-13 applies to the PrEnergy statistic (`1000ffff...`), not to sub 14.
 
 ### Key registers (hmu circuit)
 
-| Register | Eenheid | Beschrijving |
-|----------|---------|-------------|
-| `CurrentConsumedPower` | kW | Compressor elektrisch vermogen |
-| `CurrentYieldPower` | kW | Thermisch vermogen |
-| `RunDataBuildingCPumpPower` | W | Bouwpomp vermogen (65 W typisch) |
+| Register | Unit | Description |
+|----------|------|-------------|
+| `CurrentConsumedPower` | kW | Compressor electrical power |
+| `CurrentYieldPower` | kW | Thermal power |
+| `RunDataBuildingCPumpPower` | W | Building pump power (65 W typical) |
 | `RunDataStatuscode` | — | Status string (hwc_compressor_active, standby, etc.) |
-| `RunDataCompressorSpeed` | rpm | Compressortoeren |
-| `CurrentCompressorUtil` | % | Compressor benutting |
-| `FlowTemp` | °C | Aanvoertemperatuur |
-| `RunDataHighPressure` | bar | Hoge druk |
-| `RunDataCompressorOutletTemp` | °C | Compressor uitlaat |
-| `RunDataCompressorInletTemp` | °C | Compressor inlaat |
-| `RunDataEEVOutletTemp` | °C | EEV uitlaat |
-| `RunDataAirInletTemp` | °C | Luchtinlaat |
-| `RunDataFan1Speed` | rpm | Ventilator 1 |
-| `RunDataFan2Speed` | rpm | Ventilator 2 |
-| `RunDataEEVPositionAbs` | stappen | EEV positie |
+| `RunDataCompressorSpeed` | rpm | Compressor speed |
+| `CurrentCompressorUtil` | % | Compressor utilization |
+| `FlowTemp` | °C | Flow temperature |
+| `RunDataHighPressure` | bar | High pressure |
+| `RunDataCompressorOutletTemp` | °C | Compressor outlet |
+| `RunDataCompressorInletTemp` | °C | Compressor inlet |
+| `RunDataEEVOutletTemp` | °C | EEV outlet |
+| `RunDataAirInletTemp` | °C | Air inlet |
+| `RunDataFan1Speed` | rpm | Fan 1 |
+| `RunDataFan2Speed` | rpm | Fan 2 |
+| `RunDataEEVPositionAbs` | steps | EEV position |
 | `BuildingCircuitFlow` | l/h | Flow |
-| `TotalEnergyUsage` | kWh | Totale elektrische energie (cumulatief) |
-| `SupplyTempWeighted` | °C | Gewogen aanvoertemp |
-| `CopHc` | — | COP verwarmen |
-| `CopHwc` | — | COP warm water |
-| `CopCooling` | — | COP koelen |
+| `TotalEnergyUsage` | kWh | Total electrical energy (cumulative) |
+| `SupplyTempWeighted` | °C | Weighted supply temp |
+| `CopHc` | — | COP heating |
+| `CopHwc` | — | COP hot water |
+| `CopCooling` | — | COP cooling |
 
 ### Status codes
 
-`RunDataStatuscode` waarden:
-- `hwc_compressor_active` — compressor actief voor warm water
+`RunDataStatuscode` values:
+- `hwc_compressor_active` — compressor active for hot water
 - `standby` — compressor idle
-- Numeriek: 104, 114, 134 = actief
+- Numeric: 104, 114, 134 = active
 
 ## CSV management
 
-ebusd laadt CSV uit `/etc/ebusd/vaillant/` in de container. Telkens `08.hmu.HW5103.csv` voor HMU (HW 5103). CSV bestanden zijn niet direct toegankelijk via host filesystem — zitten in container image.
+ebusd loads CSV from `/etc/ebusd/vaillant/` in the container. Always `08.hmu.HW5103.csv` for HMU (HW 5103). CSV files are not directly accessible via the host filesystem — they live in the container image.
 
-Addon: `b4d7ad18_ebusd`, `--accesslevel=*`, `--enabledefine`. Geen `--configpath` override (standaard pad).
+Addon: `b4d7ad18_ebusd`, `--accesslevel=*`, `--enabledefine`. No `--configpath` override (default path).
 
 ## Use with
 
-- `kaizen` voor de steady-state development loop
-- `debugging` voor niet-triviale HA-integratie bugs
-- `verification` na deploy
+- `kaizen` for the steady-state development loop
+- `debugging` for non-trivial HA integration bugs
+- `verification` after deploy
 
 ## Avoid
 
 - **Ad-hoc SSH/SMB deploy commands** — ALWAYS use `tools/deploy_ha.sh --restart`
-- Reload als vervanging voor restart na registry/externe changes
-- `git archive` zonder te committen — archive bouwt van committed tree, niet working tree
-- Aannemen dat `state: None` in config_entries JSON betekent "niet geladen" (HA 2026.7+ persisted state niet)
-- Puntnotatie `circuit.name` in handmatige ebusd queries — gebruik `-c circuit name` met spatie
+- Reload as a replacement for restart after registry/external changes
+- `git archive` without committing — archive builds from the committed tree, not the working tree
+- Assuming that `state: None` in config_entries JSON means "not loaded" (HA 2026.7+ does not persist state)
+- Dot notation `circuit.name` in manual ebusd queries — use `-c circuit name` with a space
 
 ## Reference
 
-Zie [REFERENCE.md](./REFERENCE.md) voor API calls, storage paths, MQTT, en HA 2026.7 breaking patterns.
+See [REFERENCE.md](./REFERENCE.md) for API calls, storage paths, MQTT, and HA 2026.7 breaking patterns.
