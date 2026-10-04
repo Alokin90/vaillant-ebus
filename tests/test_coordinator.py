@@ -9,6 +9,7 @@ import json
 import struct
 import sys
 import tempfile
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -620,9 +621,9 @@ async def test_issue32_hmux0_runtime_definitions_use_discovered_circuit() -> Non
         assert any(",hmux0,RunDataElPowerConsumption," in definition for definition in definitions)
         assert any(",hmux0,RunDataCompressorSpeed," in definition for definition in definitions)
         assert any(",hmux0,RunDataBuildingCPumpPower," in definition for definition in definitions)
-        assert any(",B509,055402005b0d," in definition for definition in definitions)
-        assert any(",B509,055402000d0a," in definition for definition in definitions)
-        assert any(",B509,05540200c509," in definition for definition in definitions)
+        assert any(",B509,5402005b0d," in definition for definition in definitions)
+        assert any(",B509,5402000d0a," in definition for definition in definitions)
+        assert any(",B509,540200c509," in definition for definition in definitions)
         assert not any(",hmu," in definition for definition in definitions)
         assert not any(",Status00," in definition for definition in definitions)
 
@@ -657,10 +658,10 @@ async def test_issue161_hmux0_sw0407_runtime_definitions_are_passive_and_scan_ga
         # Issue #171: the active flow-temperature define is SW0303/HW0504-only.
         assert not any(",RunDataFlowTemp," in definition for definition in definitions)
         expected = {
-            ("hmux0", "RunDataStatuscode", "f1", "08", "B509", "055402008813"),
-            ("hmux0", "RunDataCompressorSpeed", "f1", "08", "B509", "055402000d0a"),
-            ("hmux0", "RunDataElPowerConsumption", "f1", "08", "B509", "055402005b0d"),
-            ("hmux0", "RunDataBuildingCPumpPower", "f1", "08", "B509", "05540200c509"),
+            ("hmux0", "RunDataStatuscode", "f1", "08", "B509", "5402008813"),
+            ("hmux0", "RunDataCompressorSpeed", "f1", "08", "B509", "5402000d0a"),
+            ("hmux0", "RunDataElPowerConsumption", "f1", "08", "B509", "5402005b0d"),
+            ("hmux0", "RunDataBuildingCPumpPower", "f1", "08", "B509", "540200c509"),
             ("hmux0", "KmKreisVerflTemp", "f1", "08", "B51A", "05ff3546"),
             ("hmux0", "UnterkuehlungSoll", "f1", "08", "B51A", "05ff354a"),
             ("hmux0", "UnterkuehlungIst", "f1", "08", "B51A", "05ff354b"),
@@ -669,7 +670,11 @@ async def test_issue161_hmux0_sw0407_runtime_definitions_are_passive_and_scan_ga
             ("hmux0", "KmKreisKompAuslTemp", "f1", "08", "B51A", "05ff3705"),
             ("hmux0", "KmKreisHochdruck", "f1", "08", "B51A", "05ff370b"),
             ("vwzio", "PowerConsumptionVwz", "f1", "76", "B516", "14"),
-            ("vwzio", "RunStatsImmersionHeaterHwc", "f1", "76", "B511", "021802"),
+            ("vwzio", "RunStatsImmersionHeaterHwc", "f1", "76", "B511", "1802"),
+            ("hmux0", "PowerConsumptionHmu", "f1", "08", "B516", "14"),
+            ("hmux0", "CompressorHc", "f1", "08", "B511", "1801"),
+            ("hmux0", "CompressorHwc", "f1", "08", "B511", "1802"),
+            ("vwzio", "HeaterYieldHwcTotal", "f1", "76", "B516", "1000ffff49040000"),
         }
         actual = set()
         for definition in definitions:
@@ -677,12 +682,13 @@ async def test_issue161_hmux0_sw0407_runtime_definitions_are_passive_and_scan_ga
             if len(fields) > 7 and fields[0] == "u":
                 actual.add((fields[1], fields[2], fields[4], fields[5], fields[6], fields[7]))
         assert expected <= actual
-        assert not any(",B511,021801," in definition for definition in definitions)
+        # B511/021803 stays discovery-only: it is zero in every HMUX0 capture and unnamed upstream.
+        assert not any(",B511,021803," in definition for definition in definitions)
         stats_definition = next(
             definition for definition in definitions if ",RunStatsImmersionHeaterHwc," in definition
         )
         assert stats_definition.startswith(
-            "u,vwzio,RunStatsImmersionHeaterHwc,RunStatsImmersionHeaterHwc,f1,76,B511,021802,"
+            "u,vwzio,RunStatsImmersionHeaterHwc,RunStatsImmersionHeaterHwc,f1,76,B511,1802,"
         )
         assert "ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG" in stats_definition
         assert not any(
@@ -1114,7 +1120,7 @@ async def test_issue161_passive_hmux0_definitions_do_not_generalize_to_sw0302() 
 
         definitions = [call.args[0] for call in coordinator.ebus.define_register.await_args_list]
         assert graph.nodes["hmux0"].scan_sw == "0302"
-        assert any(",B509,055402005b0d," in definition for definition in definitions)
+        assert any(",B509,5402005b0d," in definition for definition in definitions)
         assert not any(definition.startswith("u,hmux0,") for definition in definitions)
         for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
             assert not any(f",{name}," in definition for definition in definitions)
@@ -1141,7 +1147,7 @@ async def test_issue161_passive_hmux0_definitions_do_not_generalize_to_sw0302() 
         sw0303._graph = sw0303_graph
         await sw0303._define_custom_registers()
         assert sw0303_graph.nodes["hmux0"].scan_sw == "0303"
-        assert any(",B509,055402005b0d," in call.args[0] for call in sw0303.ebus.define_register.await_args_list)
+        assert any(",B509,5402005b0d," in call.args[0] for call in sw0303.ebus.define_register.await_args_list)
         for name in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
             assert not any(f",{name}," in call.args[0] for call in sw0303.ebus.define_register.await_args_list)
         sw0303._last_find_keys = set(sw0303_graph.raw_registers) | set(sw0303_graph.placeholder_registers)
@@ -1192,6 +1198,10 @@ async def test_issue161_hmux0_sw0407_fallback_skips_unverified_b51a_and_passive_
             "KmKreisHochdruck",
             "PowerConsumptionVwz",
             "RunStatsImmersionHeaterHwc",
+            "PowerConsumptionHmu",
+            "CompressorHc",
+            "CompressorHwc",
+            "HeaterYieldHwcTotal",
         }
         blocked_b51a_names = {
             "BuildingCircuitFlow",
@@ -1232,6 +1242,133 @@ async def test_issue161_hmux0_sw0407_fallback_skips_unverified_b51a_and_passive_
             assert ("hmux0", register) in [call.args for call in read_calls]
         for register in MAPPING.HMUX0_SW0407_ENVYIELD_REGISTERS:
             assert ("hmux0", register) in [call.args for call in read_calls]
+
+
+# Intent: the captured HMUX0 SW0407 and VWZIO SW0500 frames get passive definitions for power, counters and heater heat.
+# Why: issue #161 - B516/14 power, B511/0218xx compressor counters and the B516 0x49 DHW total are on the bus
+# (community evidence upstream #490/#522/#598/#610), but only the owner's gateway polls them, so they must stay passive.
+async def test_issue161_passive_power_counter_and_heater_total_definitions() -> None:
+    expectations = {
+        "u,hmux0,PowerConsumptionHmu,PowerConsumptionHmu,f1,08,B516,14,ign,,IGN:1,,,,value,,EXP,1000,kW,",
+        "u,hmux0,CompressorHc,CompressorHc,f1,08,B511,1801,ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG",
+        "u,hmux0,CompressorHwc,CompressorHwc,f1,08,B511,1802,ign,,IGN:1,,,,runtime,,ULG,,min,,cycles,,ULG",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fixture = "community/hmux0_issue161_2026-09-30_161313_discovery.yaml"
+        graph = DISCOVERY.DiscoveryService.build_device_graph(load_find_lines(fixture, after=True))
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.define_register = AsyncMock(return_value="done")
+        coordinator._graph = graph
+
+        await coordinator._define_custom_registers()
+
+        definitions = {call.args[0] for call in coordinator.ebus.define_register.await_args_list}
+        assert expectations <= definitions
+        heater_total = [d for d in definitions if ",HeaterYieldHwcTotal," in d]
+        assert len(heater_total) == 1
+        assert heater_total[0].startswith(
+            "u,vwzio,HeaterYieldHwcTotal,HeaterYieldHwcTotal,f1,76,B516,1000ffff49040000,"
+        )
+        meta = MAPPING.REGISTER_MAP["vwzio.HeaterYieldHwcTotal"]
+        assert (meta.unit, meta.state_class, meta.enabled) == ("Wh", "total_increasing", False)
+
+    # Absent path: hardware that is not HMUX0 SW0407/HW0504 gets none of these definitions.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/hmux0_issue171_2026-10-03_094933_discovery.yaml")
+        )
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.define_register = AsyncMock(return_value="done")
+        coordinator._graph = graph
+
+        await coordinator._define_custom_registers()
+
+        definitions = {call.args[0] for call in coordinator.ebus.define_register.await_args_list}
+        assert not any(
+            ",PowerConsumptionHmu," in d or ",CompressorHc," in d or ",CompressorHwc," in d for d in definitions
+        )
+
+
+# Intent: every passive `u` definition must reproduce a request that the captures show on the bus.
+# Why: an ebusd id excludes the length byte; ids that carried it (B509 `05...`, B511 `02...`) could never match (#175).
+async def test_issue161_passive_definition_ids_match_captured_requests() -> None:
+    captured: set[str] = set()
+    names = (
+        "hmux0_issue161_2026-09-28_154109_discovery.yaml",
+        "hmux0_issue161_2026-09-30_130640_discovery.yaml",
+        "hmux0_issue161_2026-09-30_132044_discovery.yaml",
+        "hmux0_issue161_2026-09-30_154054_discovery.yaml",
+        "hmux0_issue161_2026-09-30_161313_discovery.yaml",
+    )
+    for name in names:
+        dump = load_discovery_dump(f"community/{name}")
+        for section in ("unknown_telegrams", "labeled_telegrams"):
+            captured.update(str(row["request"]).casefold() for row in dump.get(section, []) if "request" in row)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/hmux0_issue161_2026-09-30_161313_discovery.yaml", after=True)
+        )
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.define_register = AsyncMock(return_value="done")
+        coordinator._graph = graph
+
+        await coordinator._define_custom_registers()
+
+        passive = [call.args[0].split(",") for call in coordinator.ebus.define_register.await_args_list]
+        passive = [fields for fields in passive if fields[0] == "u"]
+        assert len(passive) >= 17
+        for fields in passive:
+            qq, zz, pbsb, message_id = fields[4], fields[5], fields[6], fields[7]
+            request = f"{qq}{zz}{pbsb}{len(message_id) // 2:02x}{message_id}".casefold()
+            assert request in captured, (fields[2], request)
+
+
+# Intent: the active B509 definitions for SW0302/SW0303 build requests that ebusd's own labelled captures contain.
+# Why: the ids carried the length byte (`05...`), which no HMUX0 answers; the captures show the right form.
+async def test_active_b509_definition_ids_match_captured_requests() -> None:
+    captured: set[str] = set()
+    for name in (
+        "flexotherm_issue102_2026-09-12_161841_discovery.yaml",
+        "hmux0_issue99_2026-09-10_233024.yaml",
+        "arotherm_hmux0_dhw_holiday_discovery.yaml",
+    ):
+        dump = load_discovery_dump(f"community/{name}")
+        for section in ("unknown_telegrams", "labeled_telegrams", "grab"):
+            for row in dump.get(section, []) or []:
+                text = row["request"] if isinstance(row, dict) and "request" in row else str(row)
+                captured.add(text.split(" ")[0].casefold())
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/hmux0_issue99_2026-09-10_233024.yaml", after=True)
+        )
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.define_register = AsyncMock(return_value="done")
+        coordinator._graph = graph
+
+        await coordinator._define_custom_registers()
+
+        active = [call.args[0].split(",") for call in coordinator.ebus.define_register.await_args_list]
+        b509 = {fields[2]: fields for fields in active if fields[0] == "r" and len(fields) > 7 and fields[6] == "B509"}
+        assert {"RunDataCompressorSpeed", "RunDataBuildingCPumpPower"} <= set(b509)
+        for fields in b509.values():
+            message_id = fields[7]
+            request = f"31{int(fields[5], 16):02x}b509{len(message_id) // 2:02x}{message_id}".casefold()
+            if (
+                request in captured
+                or f"{fields[4]}{fields[5].zfill(2)}b509{len(message_id) // 2:02x}{message_id}" in captured
+            ):
+                continue
+            assert not message_id.startswith("05"), (fields[2], message_id)
 
 
 # Intent: failed passive definitions cannot make the integration actively probe their telegrams as a fallback.
@@ -1336,6 +1473,53 @@ async def test_issue161_fallback_exclusions_do_not_apply_to_sw0302_or_sw0303() -
                 assert actual == {("hmux0", name) for name in names}
     finally:
         COORDINATOR.REGISTER_MAP = original_map
+
+
+# Intent: HMUX0 SW0406/HW0504 units get RunDataFlowTemp and RunDataReturnTemp actively refreshed.
+# Why: issue #171 - v1.10.3 gated both reads to SW0303, so the values froze at whatever ebusd had cached.
+async def test_issue171_sw0406_precise_temperatures_are_actively_read() -> None:
+    fixture = "community/hmux0_issue171_2026-10-03_094933_discovery.yaml"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        graph = DISCOVERY.DiscoveryService.build_device_graph(load_find_lines(fixture))
+        assert (graph.nodes["hmux0"].scan_sw, graph.nodes["hmux0"].scan_hw) == ("0406", "0504")
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.read_register = AsyncMock(return_value="27.3125")
+        coordinator._graph = graph
+        coordinator._refresh_find_keys()
+
+        await coordinator._fallback_read(include_placeholders=True, include_energy=True)
+
+        actual = {call.args for call in coordinator.ebus.read_register.await_args_list}
+        assert ("hmux0", "RunDataFlowTemp") in actual
+        assert ("hmux0", "RunDataReturnTemp") in actual
+
+
+# Intent: the SW0406 precise-temperature poll keeps rejecting implausible decodes and stays off other firmware.
+# Why: issue #99 units returned absurd values; only revisions with evidenced layout may be polled.
+async def test_issue171_precise_temperature_poll_stays_hardware_gated() -> None:
+    fixture = "community/hmux0_issue171_2026-10-03_094933_discovery.yaml"
+    for scan_sw in ("0407", "0302", "0500"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lines = [
+                line.replace("SW=0406", f"SW={scan_sw}").replace(";HMUX0;0406;", f";HMUX0;{scan_sw};")
+                for line in load_find_lines(fixture)
+            ]
+            graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+            assert graph.nodes["hmux0"].scan_sw == scan_sw
+            coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+            coordinator.ebus = MagicMock(spec=EbusService)
+            coordinator.ebus.is_connected = True
+            coordinator.ebus.read_register = AsyncMock(return_value="27.3125")
+            coordinator._graph = graph
+            coordinator._refresh_find_keys()
+
+            await coordinator._fallback_read(include_placeholders=True, include_energy=True)
+
+            actual = {call.args for call in coordinator.ebus.read_register.await_args_list}
+            assert ("hmux0", "RunDataFlowTemp") not in actual
+            assert ("hmux0", "RunDataReturnTemp") not in actual
 
 
 # Intent: a usable incomplete HMUX0 scan blocks fallback reads despite retained SW0303 metadata.
@@ -2302,6 +2486,33 @@ async def test_initial_discovery_prunes_stale_cache_registers() -> None:
         await c._apply_discovery_graph(graph, "initial")
         assert "hmux0.ZZTest" not in c.registers
         assert "hmu.SourceTempInput" in c.registers
+
+
+# Intent: entities of registers the integration defined at runtime survive a post-define no-data placeholder.
+# Why: issue #175 - `define` drops ebusd's cached value, so the next find listed the env-yield registers as no-data
+# placeholders and discovery pruned and disabled user-enabled entities; without a definition they stay pruned.
+@pytest.mark.parametrize(("runtime_defined", "expected_kept"), [(True, True), (False, False)])
+async def test_initial_discovery_keeps_runtime_defined_placeholder_entities(
+    runtime_defined: bool, expected_kept: bool
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        cached_lines = ["scan.08 = Vaillant;HMUX0;0407;0504", "hmux0 HcEnvYieldTotal = 44225"]
+        c.entities = c.entity_factory.generate(DISCOVERY.DiscoveryService.build_device_graph(cached_lines))
+        assert any(entity.name == "HcEnvYieldTotal" for entity in c.entities)
+        if runtime_defined:
+            c._runtime_definitions["r.hmux0.HcEnvYieldTotal"] = "r,hmux0,HcEnvYieldTotal,HcEnvYieldTotal,31,08,B516,x"
+        graph = DISCOVERY.DiscoveryService.build_device_graph(
+            ["scan.08 = Vaillant;HMUX0;0407;0504", "hmux0 HcEnvYieldTotal = no data stored"]
+        )
+        assert "hmux0.HcEnvYieldTotal" in graph.placeholder_registers
+
+        await c._apply_discovery_graph(graph, "initial")
+
+        kept = [entity for entity in c.entities if entity.name == "HcEnvYieldTotal"]
+        assert bool(kept) is expected_kept
+        if kept:
+            assert kept[0].enabled_by_default is True and kept[0].raw_value == ""
 
 
 # Intent: B524 state metadata does not preserve cache-only values without safe fallback reads.
@@ -6011,3 +6222,44 @@ async def test_has_discovered_circuit_matches_graph() -> None:
 
         c._graph = None
         assert not c.has_discovered_circuit("ctlv2")
+
+
+# Intent: the real repairs module exposes the fix flow Home Assistant requires of a repairs platform.
+# Why: issue #161 - HA logged "Invalid repairs platform" because only create/dismiss helpers existed.
+async def test_repairs_platform_provides_confirm_fix_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    confirm_flow = MagicMock(name="ConfirmRepairFlow")
+    repairs_stub = types.SimpleNamespace(ConfirmRepairFlow=confirm_flow, RepairsFlow=object)
+    components_stub = types.SimpleNamespace(repairs=repairs_stub)
+    monkeypatch.setitem(sys.modules, "homeassistant.components", components_stub)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.repairs", repairs_stub)
+    monkeypatch.setitem(sys.modules, "vaillant_ebus.const", types.SimpleNamespace(DOMAIN="vaillant_ebus"))
+    spec = importlib.util.spec_from_file_location("vaillant_ebus.repairs_real", COMPONENT_PATH / "repairs.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "vaillant_ebus"
+    spec.loader.exec_module(module)
+
+    flow = await module.async_create_fix_flow(MagicMock(), "ebusd_unreachable", None)
+
+    assert flow is confirm_flow.return_value
+
+
+# Intent: a cache-only zone register whose live twin sits under another circuit is pruned as a stale-label phantom.
+# Why: issue #152 - bai.z1RoomHumidity (cached 44) duplicated the live bass.z1RoomHumidity (57) on the same zone device.
+@pytest.mark.parametrize(("live_twin", "expected_kept"), [(True, False), (False, True)])
+async def test_initial_discovery_prunes_cache_zone_register_duplicated_under_another_circuit(
+    live_twin: bool, expected_kept: bool
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.registers["bai.z1RoomHumidity"] = EbusdRegister(
+            circuit="bai", name="z1RoomHumidity", fields=["value"], value={"value": "44"}, has_data=True
+        )
+        lines = ["bass Z1RoomTemp = 21.5", "bai FlowTemp = 29.4"]
+        if live_twin:
+            lines.append("bass z1RoomHumidity = 57")
+        graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+
+        await c._apply_discovery_graph(graph, "initial")
+
+        assert ("bai.z1RoomHumidity" in c.registers) is expected_kept

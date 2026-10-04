@@ -120,6 +120,8 @@ SSH/SMB workflow voor custom_components op lokale HA instance. Inclusief ebusd T
 
 The script loads credentials from `.env`, builds a clean zip (excludes `__pycache__`), uploads via SMB, unzips on HA, and optionally restarts HA.
 
+`scripts/` is git-ignored en lokaal. Windows-opzet (SSH add-on zonder SFTP, `/config` van root, `sudo -n`, back-up in `/config/.deploy_backups/`): zie AGENTS.md "Deploying To The Owner's Home Assistant". Herstart met HA-MCP `ha_restart`.
+
 **If `scripts/deploy.sh` doesn't exist**, create it at `<repo>/scripts/deploy.sh` with:
 1. Load HA_HOST/HA_USER/HA_PASSWORD/HA_SSH_PASSWORD from `.env`
 2. Validate: `ruff check . && pytest -q && compileall`
@@ -203,7 +205,7 @@ s.close()
 
 **Inline via SSH**:
 ```bash
-PASS="M@rkB0v33"
+PASS="$HA_SSH_PASSWORD"  # from the git-ignored .env; never hardcode
 sshpass -p "$PASS" ssh user@host 'python3' << 'PYEOF'
 import socket, time
 s = socket.socket(); s.settimeout(5)
@@ -290,13 +292,7 @@ r5,ctlv2,z1RoomHumidity,z1RoomHumidity,31,15,B524,020003002800
 
 Key: type `r5` (zone read), QQ=31 (ebusd), ZZ=15 (CTLV2), message B524, field ID `020003002800`.
 
-**B516 werkt NIET voor power** — heeft alleen fields 10-13 (UCH):
-- Field 10: varieert (UCH, mogelijk flow gerelateerd)
-- Field 11: ~2 (UCH), 258 (UIN) — constant
-- Field 12: ~1 (UCH) — constant
-- Field 13: ~32 (UCH), ~800 (UIN) — varieert, mogelijk sub-id
-
-`PowerConsumptionHmu` met B516,14 is **fout** — B516 heeft geen field 14+ voor HMU.
+**B516 sub 14 is wel het vermogen (HMUX0 SW0407 en VWZIO SW0500, 1.10.5).** De gateway pollt `f108b5160114` (slave 08) en `f176b5160114` (slave 76): antwoord = status-byte + float32 W. Upstream ebusd-configuration #490, #610 en #638 documenteren dezelfde layout (`ign,IGN:1` + `EXP`). Op oudere HMU-firmware (HW5103 < SW0901) geeft de actieve read niets/`00`; daarom is `PowerConsumptionHmu` alleen een *passieve* definitie op HMUX0 SW0407. De oudere remark dat B516 alleen fields 10-13 heeft geldt voor de PrEnergy-statistiek (`1000ffff...`), niet voor sub 14.
 
 ### Key registers (hmu circuit)
 

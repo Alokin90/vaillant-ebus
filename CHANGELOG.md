@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.10.5 - 2026-10-04
+
+### Fixed
+
+- Keep the precise flow and return temperature (`RunDataFlowTemp`, `RunDataReturnTemp`) up to date on HMUX0
+  SW0406/HW0504 units. Since v1.10.3 the integration only asked ebusd for these values on SW0303, so on SW0406
+  they stayed at whatever ebusd had cached (issue #171). SW0303 and SW0406 are now read; other firmware versions
+  stay excluded because earlier captures returned impossible values.
+- Fix the ids of the passive HMUX0 SW0407 definitions. The ebusd id does not include the length byte, but the four
+  B509 definitions (status code, compressor speed, electrical power, building pump power) and the VWZIO backup-heater
+  counters started with it, so they could never match a telegram on the bus. This is why those entities stayed
+  `unknown` (issue #175, issue #161). A new test checks every passive id against the telegrams in the captures. The active B509 definitions for
+  SW0302/SW0303 (electrical power, compressor speed, building pump power) had the same problem and are fixed too;
+  they were unavailable before.
+- Keep entities for registers that the integration defines itself. After a restart ebusd can list them as "no data"
+  for a moment, and the integration then removed or disabled them, even when you had enabled them
+  (issue #175, environmental yield sensors).
+- Remove the `Invalid repairs platform` error at startup. The repairs module now offers the confirm step that Home
+  Assistant expects (issue #161).
+- Do not create entities for a heating circuit that the controller itself reports as `inactive`. The circuit type
+  sensor stays. A circuit whose type cannot be read is never hidden (issue #152, the unused HC3 on a BASS3).
+- Remove a stale cached zone register when the same register is live under another circuit, such as the second
+  room humidity sensor on a BASS3 system (issue #152).
+- The boiler stage-1 energy counters (`PrEnergySumHc1`, `PrEnergySumHwc1`) no longer claim kWh. Their values grow
+  far too fast for kWh, so the unit is unknown. They are now diagnostic raw counters and disabled by default
+  (issue #152). Existing entities keep their current setting.
+
+- Let the discovery dump read a longer `grab result all` response (limit raised from 10,000 to 100,000 lines). ebusd
+  2.1 and newer grabs all the time, so on a long-running system the result grew past the old limit and the dump fell
+  back to a register-only file (`grab_status: skipped_active`).
+
+### Added
+
+- Add the electrical power of the HMUX0 SW0407/HW0504 heat pump from the gateway's `B516/14` frame, plus the
+  heating and hot-water compressor runtime and start counters from `B511/1801` and `B511/1802`. The layouts match
+  upstream ebusd-configuration issues #490, #522, #610 and #638 and the captures in issue #161. These are read
+  passively and are disabled by default; when the gateway does not send the telegram they stay unavailable.
+- Add the backup-heater hot-water heat total (`B516` source `0x49`, usage `04`) for VWZIO SW0500/HW0504. This is a
+  strong assumption from the issue #161 capture: 6487 Wh against 106 minutes of heater runtime. The entity is
+  disabled by default and unavailable without data.
+
+### Notes
+
+- Not changed: Quiet mode (the `B508/0209` direction is not proven), the BASS3 calendars, the E7000 controller
+  without an ebusd configuration (discussion #31, upstream PR #623 in ebusd-configuration), and the default
+  enablement of rarely used registers.
+
 ## 1.10.4 - 2026-10-03
 
 ### Added

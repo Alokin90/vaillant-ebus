@@ -52,6 +52,9 @@ HMUX0_SW0407_PASSIVE_REGISTER_NAMES: frozenset[str] = frozenset(
         "KmKreisKompEinlTemp",
         "KmKreisKompAuslTemp",
         "KmKreisHochdruck",
+        "PowerConsumptionHmu",
+        "CompressorHc",
+        "CompressorHwc",
     }
 )
 HMUX0_SW0407_FALLBACK_NAMES: frozenset[str] = frozenset(
@@ -68,7 +71,7 @@ HMUX0_SW0407_ENVYIELD_REGISTERS: frozenset[str] = frozenset(
     }
 )
 VWZIO_SW0500_FALLBACK_BLOCKLIST: frozenset[str] = frozenset(
-    {"PowerConsumptionVwz", "RunStatsImmersionHeaterHwc", "Status01"}
+    {"PowerConsumptionVwz", "RunStatsImmersionHeaterHwc", "HeaterYieldHwcTotal", "Status01"}
 )
 VWZIO_SW0500_FALLBACK_NAMES: frozenset[str] = frozenset(item.casefold() for item in VWZIO_SW0500_FALLBACK_BLOCKLIST)
 
@@ -152,14 +155,20 @@ def hmux0_owner_scan(graph: DeviceGraph | None) -> tuple[str, ScanIdentity] | No
     return node.circuit, scan
 
 
-# Intent: allow SW0303-only runtime definitions only for current unique evidence.
-# Why: retained node firmware fields cannot authorize a definition after a partial refresh.
-def hmux0_sw0303_owner(graph: DeviceGraph | None) -> str | None:
+# Intent: HMUX0 firmware revisions (with HW0504) whose B509 RunDataFlowTemp/RunDataReturnTemp use the 1/16 degC layout.
+# Why: SW0303 was confirmed live (issue #171) and SW0406 answers the same layout (27.3125 read on SW0406/HW0504);
+# other HMUX0 revisions returned absurd decodes (issue #99), so they stay out until they have their own evidence.
+HMUX0_PRECISE_TEMPERATURE_SW_VERSIONS: frozenset[str] = frozenset({"0303", "0406"})
+
+
+# Intent: return the HMUX0 owner circuit only when its complete, current, unique scan matches the given firmware set.
+# Why: retained node firmware fields cannot authorize a definition or an active read after a partial refresh.
+def _hmux0_owner_for_sw(graph: DeviceGraph | None, sw_versions: frozenset[str]) -> str | None:
     owner_scan = hmux0_owner_scan(graph)
     if owner_scan is None:
         return None
     circuit, scan = owner_scan
-    if not scan.complete or scan.scan_sw != "0303" or scan.scan_hw != "0504":
+    if not scan.complete or scan.scan_sw not in sw_versions or scan.scan_hw != "0504":
         return None
     if (
         graph.scan_identities
@@ -168,6 +177,18 @@ def hmux0_sw0303_owner(graph: DeviceGraph | None) -> str | None:
     ):
         return None
     return circuit
+
+
+# Intent: allow SW0303-only runtime definitions only for current unique evidence.
+# Why: ebusd's own CSV lacks the SW0303 RunData definitions, so only this revision needs a runtime `define`.
+def hmux0_sw0303_owner(graph: DeviceGraph | None) -> str | None:
+    return _hmux0_owner_for_sw(graph, frozenset({"0303"}))
+
+
+# Intent: allow active RunDataFlowTemp/RunDataReturnTemp reads only for HMUX0 revisions with evidenced layout.
+# Why: SW0406 units already receive both registers from ebusd's CSV and need polling, not a `define` (issue #171).
+def hmux0_precise_temperature_owner(graph: DeviceGraph | None) -> str | None:
+    return _hmux0_owner_for_sw(graph, HMUX0_PRECISE_TEMPERATURE_SW_VERSIONS)
 
 
 # Intent: identify circuits that may be an HMUX0 owner when identity is incomplete.
@@ -795,17 +816,22 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Active Heating Stages",
         entity_category="diagnostic",
     ),
+    # Raw uint32 accumulators of unproven unit (issue #152): the F34 value grew by 90032 in 12 minutes, which no
+    # boiler delivers in kWh, and upstream issue #387 shows the counter at 2^32-80. No unit, energy class or
+    # statistics class is claimed until a unit is evidenced; the entities are disabled by default.
     "bai.PrEnergySumHc1": RegisterMeta(
-        friendly_name="Heating Energy Stage 1",
-        device_class="energy",
-        unit="kWh",
+        friendly_name="Heating Energy Stage 1 (raw counter)",
+        icon="mdi:counter",
         state_class="total_increasing",
+        entity_category="diagnostic",
+        enabled=False,
     ),
     "bai.PrEnergySumHwc1": RegisterMeta(
-        friendly_name="Hot Water Energy Stage 1",
-        device_class="energy",
-        unit="kWh",
+        friendly_name="Hot Water Energy Stage 1 (raw counter)",
+        icon="mdi:counter",
         state_class="total_increasing",
+        entity_category="diagnostic",
+        enabled=False,
     ),
     # ecoTEC Plus VMW 30 CS/1-5 / additional BAI endpoints.
     "bai.HwcWaterflow": RegisterMeta(
@@ -976,6 +1002,17 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         device_class="power",
         unit="kW",
         icon="mdi:flash",
+        fallback_read=False,
+    ),
+    # Strong assumption (issue #161): B516 source 0x49 / usage 04 on the VWZIO is the DHW heat delivered by the
+    # backup heater in Wh. Upstream names no register for source 9, so the entity stays disabled by default.
+    "vwzio.HeaterYieldHwcTotal": RegisterMeta(
+        friendly_name="Backup Heater DHW Heat Total",
+        device_class="energy",
+        unit="Wh",
+        state_class="total_increasing",
+        icon="mdi:water-boiler",
+        enabled=False,
         fallback_read=False,
     ),
     "vwzio.RunStatsImmersionHeaterHwc": RegisterMeta(
@@ -1168,6 +1205,7 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         state_class="total_increasing",
         entity_category="diagnostic",
         entity_type="sensor",
+        enabled=False,
     ),
     "hmu.CompressorHc.cycles": RegisterMeta(
         friendly_name="Compressor Starts (HC)",
@@ -1175,6 +1213,7 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         state_class="total_increasing",
         entity_category="diagnostic",
         entity_type="sensor",
+        enabled=False,
     ),
     "hmu.CompressorHwc": RegisterMeta(
         friendly_name="Compressor DHW",
@@ -1189,6 +1228,7 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         state_class="total_increasing",
         entity_category="diagnostic",
         entity_type="sensor",
+        enabled=False,
     ),
     "hmu.CompressorHwc.cycles": RegisterMeta(
         friendly_name="Compressor Starts (DHW)",
@@ -1196,6 +1236,7 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         state_class="total_increasing",
         entity_category="diagnostic",
         entity_type="sensor",
+        enabled=False,
     ),
     "hmu.RunStatsCompressorHc": RegisterMeta(
         friendly_name="Compressor HC Stats",

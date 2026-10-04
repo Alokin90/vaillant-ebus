@@ -59,6 +59,8 @@ async def test_arotherm_fixture_loads() -> None:
         ("community/geniaset_bass3_discovery.yaml", 50),
         ("community/flexotherm_133_cooling_discovery.yaml", 50),
         ("community/flexotherm_vwf1174_issue134_2026-09-15_162647.yaml", 50),
+        ("community/hmux0_issue171_2026-10-03_094933_discovery.yaml", 100),
+        ("community/hmu_e7000_discussion31_2026-10-04_113747_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_off_idle_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_off_heating_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_on_heating_discovery.yaml", 50),

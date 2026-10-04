@@ -86,7 +86,15 @@
   "issues": {
     "ebusd_unreachable": {
       "title": "ebusd is unreachable",
-      "description": "The integration cannot reach the ebusd daemon. Ensure ebusd is running and restart Home Assistant to retry."
+      "description": "The integration cannot reach the ebusd daemon. Ensure ebusd is running and restart Home Assistant to retry.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "ebusd is unreachable",
+            "description": "Start ebusd and check the connection settings, then select Submit to dismiss this repair. The integration checks ebusd again and shows the repair again if it is still unreachable."
+          }
+        }
+      }
     }
   }
 }
