@@ -108,21 +108,21 @@ SSH/SMB workflow voor custom_components op lokale HA instance. Inclusief ebusd T
 
 ## Deploy workflow
 
-**ALWAYS use `scripts/deploy.sh` — never write ad-hoc SSH/SMB commands.**
+**ALWAYS use `tools/deploy_ha.sh` — never write ad-hoc SSH/SMB commands.**
 
 ```bash
 # Full deploy: validate + build + upload + unzip + restart HA
-./scripts/deploy.sh --restart
+./tools/deploy_ha.sh --restart
 
 # Quick iteration (skip ruff/pytest/compileall):
-./scripts/deploy.sh --restart --skip-validate
+./tools/deploy_ha.sh --restart --skip-validate
 ```
 
 The script loads credentials from `.env`, builds a clean zip (excludes `__pycache__`), uploads via SMB, unzips on HA, and optionally restarts HA.
 
-`scripts/` is git-ignored en lokaal. Windows-opzet (SSH add-on zonder SFTP, `/config` van root, `sudo -n`, back-up in `/config/.deploy_backups/`): zie AGENTS.md "Deploying To The Owner's Home Assistant". Herstart met HA-MCP `ha_restart`.
+`tools/deploy_ha.sh` en `tools/deploy_ha.py` zijn ingecheckt (zonder geheimen). Windows-opzet (SSH add-on zonder SFTP, `/config` van root, `sudo -n`, back-up in `/config/.deploy_backups/`): zie AGENTS.md "Deploying To The Owner's Home Assistant". Herstart met HA-MCP `ha_restart`.
 
-**If `scripts/deploy.sh` doesn't exist**, create it at `<repo>/scripts/deploy.sh` with:
+**If `tools/deploy_ha.sh` doesn't exist**, create it at `<repo>/tools/deploy_ha.sh` with:
 1. Load HA_HOST/HA_USER/HA_PASSWORD/HA_SSH_PASSWORD from `.env`
 2. Validate: `ruff check . && pytest -q && compileall`
 3. Build zip from `custom_components/<domain>/` (no `__pycache__`, no dir prefix)
@@ -341,7 +341,7 @@ Addon: `b4d7ad18_ebusd`, `--accesslevel=*`, `--enabledefine`. Geen `--configpath
 
 ## Avoid
 
-- **Ad-hoc SSH/SMB deploy commands** — ALWAYS use `scripts/deploy.sh --restart`
+- **Ad-hoc SSH/SMB deploy commands** — ALWAYS use `tools/deploy_ha.sh --restart`
 - Reload als vervanging voor restart na registry/externe changes
 - `git archive` zonder te committen — archive bouwt van committed tree, niet working tree
 - Aannemen dat `state: None` in config_entries JSON betekent "niet geladen" (HA 2026.7+ persisted state niet)

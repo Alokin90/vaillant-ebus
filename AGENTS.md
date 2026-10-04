@@ -333,6 +333,21 @@ Hard-won facts from the 1.10.x line. Read these before touching `_define_custom_
 - The owner's own system is HMU00/flexoTHERM + CTLV2 + VWZ00. It cannot exercise HMUX0 or VWZIO code paths; those rest
   on community fixtures.
 
+## Developer Helper Tools
+
+| Tool | Use |
+| --- | --- |
+| `tools/validate.py` | CI parity in one command, with the Windows known-failure baseline. |
+| `tools/check_translations.py` | hassfest translation rules (a fixable repair has `fix_flow`, never a `description`). |
+| `tools/fetch_attachments.py` | Download issue/discussion attachments to a scratch directory, refuse `tests/fixtures`, flag duplicates of existing fixtures. |
+| `tools/gh_reply.py` | Post a reply from a Markdown file to an issue or discussion thread and update `.gh-inbox-state.json`. Only after the owner approved the text. |
+| `tools/deploy_ha.sh` | Validate and deploy to the owner's Home Assistant (see below). |
+| `tools/search_upstream.sh`, `tools/compare_dumps.py`, `tools/dump_projection.py`, `tools/version.py` | Upstream search, dump diff, dump projection, version consistency. |
+
+Shell notes for agents: on Windows with Git Bash, never pass multi-line Python with backslashes, quotes or `$` through an
+inline heredoc. Write a script file (a scratch directory is fine) and run it. Check `git status` before and after bulk
+downloads. Foreground `sleep` is blocked; wait for CI with the PR status tool, not with a polling loop.
+
 ## Known Limitations
 
 - Many heat-pump registers return `no data stored` while the compressor is idle.
@@ -365,9 +380,14 @@ Hard-won facts from the 1.10.x line. Read these before touching `_define_custom_
 
 ## Validation
 
+`python tools/validate.py` runs everything CI runs (ruff, scoped format, `mypy --strict`, version, translation
+rules, YAML, compileall, `git diff --check`, pytest) and, on Windows, compares failing tests with
+`tools/known_env_failures.txt` so only new failures fail the run. Use `--quick` to skip pytest and `-k expr` to
+narrow it. The individual commands below remain the reference.
+
 Use the repository virtualenv: `.venv/bin/<tool>` on Linux/macOS, `.venv/Scripts/<tool>` on Windows. Create it with
 `python -m venv .venv && .venv/Scripts/python -m pip install pytest pytest-asyncio pyyaml voluptuous ruff paramiko`
-(`paramiko` is only for `scripts/deploy.py`).
+(`paramiko` is only for `tools/deploy_ha.py`).
 
 ```bash
 .venv/bin/ruff check .
@@ -392,7 +412,7 @@ Every release candidate must exercise the discovery-dump service on the owner's
 Home Assistant server after deployment; a successful startup or unit test alone
 does not cover this service.
 
-1. Deploy the candidate with `scripts/deploy.sh` after repository validation passes (see "Deploying To The
+1. Deploy the candidate with `tools/deploy_ha.sh` after repository validation passes (see "Deploying To The
    Owner's Home Assistant" below), then restart Home Assistant with the HA-MCP `ha_restart` tool. Do not
    substitute an ad-hoc SSH/SMB deployment.
 2. Through HA-MCP, confirm the `vaillant_ebus` entry is loaded. Call
@@ -435,7 +455,7 @@ does not cover this service.
 
 ## Deploying To The Owner's Home Assistant
 
-- `scripts/` is git-ignored local tooling. `scripts/deploy.sh` validates, then runs `scripts/deploy.py` (paramiko).
+- `tools/deploy_ha.sh` validates (`tools/validate.py`), then runs `tools/deploy_ha.py` (paramiko; `pip install paramiko`).
   Credentials come only from the git-ignored `.env` (`HA_HOST`, `HA_SSH_USER`, `HA_SSH_PASSWORD`; see `.env.example`).
   Never print, grep for, or commit credentials. Never read the Supervisor token to work around a blocked command.
 - The HA OS SSH add-on has **no SFTP** and `/config/custom_components` is root-owned: upload over an exec channel and
@@ -471,8 +491,10 @@ does not cover this service.
 3. `python tools/version.py bump X.Y.Z`, write the human CHANGELOG section (simple language, honest notes about what is
    not changed), run the validation block, then independent review and audit.
 4. Deploy to the owner's HA, run the smoke test, record deviations in the plan.
-5. Commit, push the branch, open a PR, merge only after the owner agrees; the annotated `vX.Y.Z` tag triggers the CI
-   release job. Then reply on the affected issues and discussions.
+5. Commit, push the branch and open the PR. **Wait for all PR checks (including hassfest and HACS validation) to be
+   green before pushing the annotated `vX.Y.Z` tag**: the tag triggers the release job at once, and in 1.10.5 a tag
+   pushed early published a release whose hassfest check failed, so the tag had to be moved. Merge only after the
+   owner agrees. Then reply on the affected issues and discussions.
 
 ## GitHub Communication
 
