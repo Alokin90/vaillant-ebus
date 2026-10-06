@@ -1780,6 +1780,51 @@ async def test_runtime_definitions_resolve_logical_circuits() -> None:
         assert all(",hmu," not in definition for definition in definitions)
 
 
+# Intent: B524 runtime definitions are never defined on a BAI boiler interface that merely owns control registers.
+# Why: issue #179 - on a VRC350 (35000) bus the only controller-typed circuit is `bai`; B524 is the VRC700-family
+# protocol, the controller answers `00`, and the `r5` poll definitions then log `ERR: invalid position` forever.
+async def test_issue179_b524_definitions_skip_bai_boiler_interface() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/vrc350_issue179_2026-10-06_082936_discovery.yaml")
+        )
+        assert c._graph.heating_controller_result().circuit == "bai"
+
+        await c._define_custom_registers()
+
+        definitions = [call.args[0] for call in c.ebus.define_register.await_args_list]
+        assert all("B524" not in definition.upper() for definition in definitions), definitions
+        # The unrelated BAI B510/B509 write definitions for the same circuit stay available.
+        assert any(",bai,HeatingSwitch," in definition for definition in definitions)
+
+
+# Intent: B524 runtime definitions still reach a real VRC700-family controller.
+# Why: the BAI gate for issue #179 must not drop `ctlv2.z1RoomHumidity` for controllers that answer B524.
+async def test_b524_definitions_still_defined_on_ctlv2_controller() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(
+            [
+                "scan.15 = Vaillant;CTLV2;0507;6903",
+                "ctlv2 Z1OpMode = auto",
+                "bai HwcTempDesired = 50",
+                "scan.08 = Vaillant;BAI00;0202;9602",
+            ]
+        )
+
+        await c._define_custom_registers()
+
+        definitions = [call.args[0] for call in c.ebus.define_register.await_args_list]
+        assert any(",ctlv2,z1RoomHumidity," in definition for definition in definitions), definitions
+
+
 # Intent: runtime controller definitions resolve ctlv4 exactly like the historical ctlv2 alias.
 # Why: controller numbering must not change runtime ownership behavior.
 async def test_runtime_definitions_resolve_ctlv4_owner() -> None:

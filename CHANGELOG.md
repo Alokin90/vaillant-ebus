@@ -14,6 +14,12 @@
   replaced the latest payload of a message between the two snapshots, and the dump then reported `skipped_active`.
   The capture is now kept. Rows whose counts had to be estimated are listed under `grab_approximate_rows` in the
   dump metadata. A counter that goes down (an ebusd restart) still discards the capture.
+- Stop the endless `ERR: invalid position` polling on a VRC350 (`35000`) system. On that bus the only circuit typed
+  as a controller is the BAI boiler interface, so the CTLV2 B524 definitions (`z1RoomHumidity`,
+  `ManualCoolingStartDate`, `ManualCoolingEndDate`) were defined on the boiler, which answers `00` to them, and
+  ebusd kept polling them (issue #179). B524 definitions are no longer defined on a BAI boiler interface; real
+  VRC700-family controllers are not affected. ebusd keeps runtime definitions until it restarts, so restart ebusd
+  once after updating to stop the polling that already runs.
 
 ### Not changed
 

@@ -1559,6 +1559,18 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             )
             if resolution.status != ResolutionStatus.UNIQUE:
                 return None
+            # Intent: B524 belongs to the VRC700-family controllers, never to a BAI boiler interface.
+            # Why: a BAI that owns control registers is resolved as the heating controller when the real controller
+            # (e.g. a VRC350 `35000`) is not typed as one; the `r5` poll definitions then spin on `invalid position`
+            # (issue #179). The scan id says what the node is, so no per-model circuit name is needed; the real
+            # controller answers B524 with `00`, so re-targeting these definitions would not help either.
+            if (
+                is_controller_circuit(parts[1])
+                and definition.split(",")[6:7] == ["B524"]
+                and resolution.node is not None
+                and resolution.node.scan_type.upper().startswith("BAI")
+            ):
+                return None
             resolved = resolution.circuit or parts[1]
             if (
                 parts[0] == "r"
