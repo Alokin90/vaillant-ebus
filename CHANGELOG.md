@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.11.0 - 2026-10-06
+
+### Fixed
+
+- Stop the repeated reloads of the integration on systems with a VWZIO SW0500. The hydraulic station power sensor
+  (`PowerConsumptionVwz`) was removed as stale at every start, switched on again a moment later by the fallback
+  read, and Home Assistant reloads the whole integration after each such change. Every entity then went unavailable
+  for a few seconds, sometimes every minute or two (issues #171 and #175). Registers that the integration defines
+  itself are no longer treated as stale, are no longer switched off while they have no value, and do not show an
+  old value from the previous session.
+- Keep the raw traffic of a discovery dump with a positive `grab_duration`. Two real dumps lost it because ebusd had
+  replaced the latest payload of a message between the two snapshots, and the dump then reported `skipped_active`.
+  The capture is now kept. Rows whose counts had to be estimated are listed under `grab_approximate_rows` in the
+  dump metadata. A counter that goes down (an ebusd restart) still discards the capture.
+
+### Not changed
+
+- The slow passive values on HMUX0 SW0407 (status code, compressor speed, building pump power and the compressor
+  counters) have no code change of their own. The gateway sends them about every five minutes, and every reload
+  wipes them, so the reload fix above is the expected cure. Please confirm on 1.11.0.
+- A discovery dump with a very long `grab_duration` (300 seconds) that produced no file at all. The cause is not
+  known yet; a Home Assistant log of the failing call would help.
+
 ## 1.10.5 - 2026-10-04
 
 ### Fixed
