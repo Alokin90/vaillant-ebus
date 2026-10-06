@@ -1802,6 +1802,32 @@ async def test_issue179_b524_definitions_skip_bai_boiler_interface() -> None:
         assert any(",bai,HeatingSwitch," in definition for definition in definitions)
 
 
+# Intent: the fallback read must not probe registers whose B524 definition was withheld on a BAI boiler interface.
+# Why: issue #179 review - before any error line is cached, the map-driven pass still read them once per cycle.
+async def test_issue179_fallback_read_skips_withheld_b524_registers() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.last_find_usable = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c.ebus.read_register = AsyncMock(return_value=None)
+        lines = [
+            line
+            for line in load_find_lines("community/vrc350_issue179_2026-10-06_082936_discovery.yaml")
+            if not line.startswith(("bai z1RoomHumidity", "bai ManualCooling"))
+        ]
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+        c._refresh_find_keys()
+        await c._define_custom_registers()
+
+        await c._fallback_read()
+
+        read = {(call.args[0], call.args[1]) for call in c.ebus.read_register.await_args_list}
+        withheld = {("bai", "z1RoomHumidity"), ("bai", "ManualCoolingStartDate"), ("bai", "ManualCoolingEndDate")}
+        assert not withheld & read
+
+
 # Intent: B524 runtime definitions still reach a real VRC700-family controller.
 # Why: the BAI gate for issue #179 must not drop `ctlv2.z1RoomHumidity` for controllers that answer B524.
 async def test_b524_definitions_still_defined_on_ctlv2_controller() -> None:

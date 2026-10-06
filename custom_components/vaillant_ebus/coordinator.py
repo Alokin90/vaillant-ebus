@@ -483,6 +483,8 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         self._last_placeholder_poll = datetime.min
         self._last_energy_poll = datetime.min
         self._runtime_definitions: dict[str, str] = {}
+        # (circuit, name) pairs whose runtime definition was withheld because the owner cannot answer it.
+        self._withheld_runtime_registers: set[tuple[str, str]] = set()
         self._write_log: list[dict] = []  # recent write attempts (verification/telegram diag)
         self._cancel_set_mode_override: Callable[[], None] | None = None
         self._set_mode_override_payload: str | None = None
@@ -1360,6 +1362,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             or self._graph is None
         ):
             return
+        self._withheld_runtime_registers.clear()
         # Definitions may target hardware not present on this bus. ebusd
         # reports those as unavailable; fallback/entity filtering handles that.
         # Keep only definitions verified by upstream or community evidence here.
@@ -1570,6 +1573,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 and resolution.node is not None
                 and resolution.node.scan_type.upper().startswith("BAI")
             ):
+                self._withheld_runtime_registers.add((resolution.node.circuit.casefold(), parts[2].casefold()))
                 return None
             resolved = resolution.circuit or parts[1]
             if (
@@ -2121,6 +2125,10 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             if "." in name or f"{circuit}.{name}".casefold() in skipped_read_keys:
                 return
             if (circuit_key, name_key) in passive_register_keys:
+                return
+            # Intent: never read a register whose runtime definition was withheld because its owner cannot answer it.
+            # Why: the map-driven pass would otherwise still send a one-off read for it each cycle (issue #179).
+            if (circuit_key, name_key) in self._withheld_runtime_registers:
                 return
             # B511 counters remain passive even if their map fallback metadata changes.
             if name_key == "runstatsimmersionheaterhwc":

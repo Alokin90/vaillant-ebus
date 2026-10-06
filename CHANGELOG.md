@@ -19,7 +19,8 @@
   `ManualCoolingStartDate`, `ManualCoolingEndDate`) were defined on the boiler, which answers `00` to them, and
   ebusd kept polling them (issue #179). B524 definitions are no longer defined on a BAI boiler interface; real
   VRC700-family controllers are not affected. ebusd keeps runtime definitions until it restarts, so restart ebusd
-  once after updating to stop the polling that already runs.
+  once after updating to stop the polling that already runs. The one-off fallback reads of these registers are
+  skipped as well.
 
 ### Not changed
 
