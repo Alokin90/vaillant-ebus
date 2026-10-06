@@ -483,6 +483,8 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         self._last_placeholder_poll = datetime.min
         self._last_energy_poll = datetime.min
         self._runtime_definitions: dict[str, str] = {}
+        # (circuit, name) pairs whose runtime definition was withheld because the owner cannot answer it.
+        self._withheld_runtime_registers: set[tuple[str, str]] = set()
         self._write_log: list[dict] = []  # recent write attempts (verification/telegram diag)
         self._cancel_set_mode_override: Callable[[], None] | None = None
         self._set_mode_override_payload: str | None = None
@@ -936,7 +938,17 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         # to appear.
         if source == "initial":
             live_keys = set(graph.raw_registers) | set(graph.placeholder_registers)
-            stale = [rk for rk in self.registers if not _cache_register_is_supported(rk, live_keys, graph)]
+            # Intent: registers the integration defined on this bus keep their entities while ebusd has no value.
+            # Why: `define` can drop the cached value, so a post-define find lists them as no-data placeholders
+            # or omits them until the next telegram or read; pruning them disabled user-enabled entities (#175)
+            # and, once the fallback read re-enabled them, made Home Assistant reload the entry in a loop (#171).
+            runtime_defined_key_folds = self._runtime_defined_key_folds()
+            stale = [
+                rk
+                for rk in self.registers
+                if rk.casefold() not in runtime_defined_key_folds
+                and not _cache_register_is_supported(rk, live_keys, graph)
+            ]
             for rk in stale:
                 del self.registers[rk]
             if stale:
@@ -947,15 +959,15 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 )
             stale_keys = set(stale)
             raw_key_folds = {key.casefold() for key in graph.raw_registers}
-            # Intent: registers the integration defined on this bus keep their entities while ebusd has no value.
-            # Why: `define` can drop the cached value, so a post-define find lists them as no-data placeholders
-            # until the next telegram or read; pruning them disabled user-enabled entities (#175).
-            runtime_defined_key_folds = {
-                f"{parts[1]}.{parts[2]}".casefold()
-                for definition_key in self._runtime_definitions
-                if len(parts := definition_key.split(".", 2)) == 3
-            }
             placeholder_keys = {key for key in graph.placeholder_registers if key.casefold() not in raw_key_folds}
+            # Intent: a runtime-defined register that find omits must not show its previous-session value.
+            # Why: it is kept for its entity, but no telegram has arrived since `define`, so it is unavailable.
+            listed_folds = raw_key_folds | {key.casefold() for key in graph.placeholder_registers}
+            for register_key, register in self.registers.items():
+                if register_key.casefold() in runtime_defined_key_folds and register_key.casefold() not in listed_folds:
+                    register.value = _register_values(register_key, None)
+                    register.has_data = False
+            omitted_runtime_folds = runtime_defined_key_folds - listed_folds
             pruneable_placeholder_keys = {
                 key for key in placeholder_keys if key.casefold() not in runtime_defined_key_folds
             }
@@ -965,7 +977,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             pruneable_placeholder_folds = {key.casefold() for key in pruneable_placeholder_keys}
             for entity in self.entities:
                 entity_key = f"{entity.circuit}.{entity.name}"
-                if entity_key.casefold() in {key.casefold() for key in placeholder_keys}:
+                if entity_key.casefold() in {key.casefold() for key in placeholder_keys} | omitted_runtime_folds:
                     # A sentinel is unavailable, never the stale cached number, even for runtime-defined registers.
                     entity.raw_value = ""
                     if entity_key.casefold() in pruneable_placeholder_folds:
@@ -1242,6 +1254,15 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             except Exception as exc:
                 _LOGGER.warning("Entity adder failed for %s: %s", entity_type, exc)
 
+    # Intent: casefolded `circuit.name` keys of the registers this integration defined on the current bus.
+    # Why: discovery pruning and no-data disabling must leave these alone while ebusd has no value for them.
+    def _runtime_defined_key_folds(self) -> set[str]:
+        return {
+            f"{parts[1]}.{parts[2]}".casefold()
+            for definition_key in self._runtime_definitions
+            if len(parts := definition_key.split(".", 2)) == 3
+        }
+
     # Disable existing no-data entities after rediscovery; analysis re-enables
     # them when the register later returns a real value. An enabled registry
     # entry (disabled_by is None) whose description carries no live value is
@@ -1253,6 +1274,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
     def _disable_no_data_registry_entities(self, descriptions: list[EntityDescription]) -> None:
         registry = entity_registry.async_get(self.hass)
         disabled = 0
+        runtime_defined = self._runtime_defined_key_folds()
         controller = self._graph.heating_controller_result().node if self._graph is not None else None
         for description in descriptions:
             if (
@@ -1264,6 +1286,12 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             ):
                 continue
             if description.raw_value:
+                continue
+            # Intent: never flip the registry state of a register the integration defined itself.
+            # Why: passive definitions legitimately have no value until the next telegram, and every disabled_by
+            # change makes Home Assistant reload the whole entry (issues #171, #175).
+            description_key = f"{getattr(description, 'circuit', '')}.{getattr(description, 'name', '')}".casefold()
+            if description_key in runtime_defined:
                 continue
             # Only the integration may manage (re-disable) entries it already
             # disabled; a user-disabled entry is never touched.
@@ -1334,6 +1362,7 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             or self._graph is None
         ):
             return
+        self._withheld_runtime_registers.clear()
         # Definitions may target hardware not present on this bus. ebusd
         # reports those as unavailable; fallback/entity filtering handles that.
         # Keep only definitions verified by upstream or community evidence here.
@@ -1532,6 +1561,19 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
                 else self._graph.resolve_circuit_result(parts[1])
             )
             if resolution.status != ResolutionStatus.UNIQUE:
+                return None
+            # Intent: B524 belongs to the VRC700-family controllers, never to a BAI boiler interface.
+            # Why: a BAI that owns control registers is resolved as the heating controller when the real controller
+            # (e.g. a VRC350 `35000`) is not typed as one; the `r5` poll definitions then spin on `invalid position`
+            # (issue #179). The scan id says what the node is, so no per-model circuit name is needed; the real
+            # controller answers B524 with `00`, so re-targeting these definitions would not help either.
+            if (
+                is_controller_circuit(parts[1])
+                and definition.split(",")[6:7] == ["B524"]
+                and resolution.node is not None
+                and resolution.node.scan_type.upper().startswith("BAI")
+            ):
+                self._withheld_runtime_registers.add((resolution.node.circuit.casefold(), parts[2].casefold()))
                 return None
             resolved = resolution.circuit or parts[1]
             if (
@@ -2083,6 +2125,10 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
             if "." in name or f"{circuit}.{name}".casefold() in skipped_read_keys:
                 return
             if (circuit_key, name_key) in passive_register_keys:
+                return
+            # Intent: never read a register whose runtime definition was withheld because its owner cannot answer it.
+            # Why: the map-driven pass would otherwise still send a one-off read for it each cycle (issue #179).
+            if (circuit_key, name_key) in self._withheld_runtime_registers:
                 return
             # B511 counters remain passive even if their map fallback metadata changes.
             if name_key == "runstatsimmersionheaterhwc":

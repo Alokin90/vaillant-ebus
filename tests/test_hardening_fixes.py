@@ -985,16 +985,6 @@ async def test_async_grab_diffs_existing_capture_without_stopping_it(
             ["grab", "grab result all", "grab result all"],
         ),
         (
-            ["1008b5110100 / 09abcdef0000000000 = 2"],
-            ["f108b5110100 / 09abcdef0000000000 = 3"],
-            ["grab", "grab result all", "grab result all"],
-        ),
-        (
-            ["1008b5240100 / 00 = 2: ctlv3 Z1OpMode"],
-            ["f108b5240100 / 00 = 3: ctlv3 Z1OpMode"],
-            ["grab", "grab result all", "grab result all"],
-        ),
-        (
             ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"],
             [],
             ["grab", "grab result all", "grab result all"],
@@ -1266,6 +1256,162 @@ def test_grab_delta_matches_known_variants_by_stable_request() -> None:
     ]
 
 
+# Intent: keep the capture when a one-row family changes master address between snapshots.
+# Why: issues #171 and #175 lost their whole raw capture to this case; the count delta is still valid and the family
+# is reported as approximate instead.
+def test_grab_delta_keeps_single_row_with_changed_source_and_flags_it() -> None:
+    baseline = DUMP._validate_grab_result_response(["1008b5110100 / 09abcdef0000000000 = 2"])
+    final = DUMP._validate_grab_result_response(["f108b5110100 / 09abcdef0000000000 = 5"])
+    approximate: list[str] = []
+
+    assert DUMP._grab_result_delta(baseline, final, approximate) == ["f108b5110100 / 09abcdef0000000000 = 3"]
+    assert approximate == ["f108b5110100 / 09abcdef0000000000"]
+
+
+# Intent: keep a multi-row family whose latest payload changed instead of discarding the capture.
+# Why: ebusd retains one latest payload per key, so a changed payload makes the baseline row vanish (issue #175).
+def test_grab_delta_attributes_replaced_row_in_multi_row_family() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode", "f108b5240101 / 01 = 4: ctlv3 Z1OpMode"]
+    )
+    final = DUMP._validate_grab_result_response(
+        ["f108b5240100 / 00 = 7: ctlv3 Z1OpMode", "f108b5240102 / 02 = 7: ctlv3 Z1OpMode"]
+    )
+    approximate: list[str] = []
+
+    assert DUMP._grab_result_delta(baseline, final, approximate) == [
+        "f108b5240100 / 00 = 2: ctlv3 Z1OpMode",
+        "f108b5240102 / 02 = 3: ctlv3 Z1OpMode",
+    ]
+    assert approximate == ["f108b5240102 / 02"]
+
+
+# Intent: still reject a counter that fell, which signals an ebusd restart rather than a payload change.
+# Why: a reset followed by refill would otherwise produce invented counts.
+def test_grab_delta_rejects_replaced_row_when_family_total_drops() -> None:
+    baseline = DUMP._validate_grab_result_response(
+        ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode", "f108b5240101 / 01 = 4: ctlv3 Z1OpMode"]
+    )
+    final = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 6: ctlv3 Z1OpMode"])
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match="row changed"):
+        DUMP._grab_result_delta(baseline, final)
+
+
+# Intent: keep rows added to a family exact when no baseline row vanished.
+# Why: a new row's whole count happened inside the interval, so splitting or flagging it would lose exact data.
+def test_grab_delta_keeps_added_rows_exact_when_nothing_vanished() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(
+        [
+            "f108b5240100 / 00 = 2: ctlv3 Z1OpMode",
+            "f108b5240101 / 01 = 3: ctlv3 Z1OpMode",
+            "f108b5240102 / 02 = 5: ctlv3 Z1OpMode",
+        ]
+    )
+    approximate: list[str] = []
+
+    assert DUMP._grab_result_delta(baseline, final, approximate) == [
+        "f108b5240101 / 01 = 3: ctlv3 Z1OpMode",
+        "f108b5240102 / 02 = 5: ctlv3 Z1OpMode",
+    ]
+    assert approximate == []
+
+
+# Intent: split replaced-row growth over several new rows without losing a row's payload.
+# Why: the per-row split is a guess, but every replacement row in the final snapshot must stay in the dump.
+@pytest.mark.parametrize(("growth", "expected"), [(1, [1, 1]), (5, [3, 2]), (0, [0, 0])])
+def test_grab_delta_split_over_several_replacement_rows_never_drops_a_row(growth: int, expected: list[int]) -> None:
+    baseline = DUMP._validate_grab_result_response(
+        ["f108b5240100 / 00 = 4: ctlv3 Z1OpMode", "f108b5240101 / 01 = 6: ctlv3 Z1OpMode"]
+    )
+    final = DUMP._validate_grab_result_response(
+        [
+            f"f108b5240102 / 02 = {4 + growth}: ctlv3 Z1OpMode",
+            "f108b5240103 / 03 = 6: ctlv3 Z1OpMode",
+        ]
+    )
+    deltas = DUMP._ambiguous_family_deltas(
+        DUMP._coalesce_grab_result_entries(baseline), DUMP._coalesce_grab_result_entries(final)
+    )[0]
+
+    assert sorted(deltas.values(), reverse=True) == expected
+    assert sum(deltas.values()) >= growth
+
+
+# Intent: fail closed when a row vanished with growth but no replacement row, or when a stable row's counter fell.
+# Why: both shapes mean ebusd was restarted or reset rather than a payload being replaced.
+@pytest.mark.parametrize(
+    ("baseline_lines", "final_lines", "message"),
+    [
+        (
+            ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode", "f108b5240101 / 01 = 4: ctlv3 Z1OpMode"],
+            ["f108b5240100 / 00 = 12: ctlv3 Z1OpMode"],
+            "row changed",
+        ),
+        (
+            ["f108b5240100 / 00 = 5: ctlv3 Z1OpMode", "f108b5240101 / 01 = 4: ctlv3 Z1OpMode"],
+            ["f108b5240100 / 00 = 3: ctlv3 Z1OpMode", "f108b5240102 / 02 = 9: ctlv3 Z1OpMode"],
+            "counter decreased",
+        ),
+    ],
+)
+def test_grab_delta_fails_closed_on_unexplained_family_change(
+    baseline_lines: list[str], final_lines: list[str], message: str
+) -> None:
+    baseline = DUMP._validate_grab_result_response(baseline_lines)
+    final = DUMP._validate_grab_result_response(final_lines)
+
+    with pytest.raises(DUMP.GrabIntervalUnavailableError, match=message):
+        DUMP._grab_result_delta(baseline, final)
+
+
+# Intent: report a family that first appears in the final snapshot with its full cumulative count.
+# Why: it is new to the interval, so it must be exact and not flagged approximate.
+def test_grab_delta_final_only_family_is_exact_and_unflagged() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(
+        ["f108b5240100 / 00 = 2: ctlv3 Z1OpMode", "f108b5240101 / 01 = 4: ctlv3 Z2OpMode"]
+    )
+    approximate: list[str] = []
+
+    assert DUMP._grab_result_delta(baseline, final, approximate) == ["f108b5240101 / 01 = 4: ctlv3 Z2OpMode"]
+    assert approximate == []
+
+
+# Intent: carry the approximate rows from the delta into the capture result the dump metadata is built from.
+# Why: readers rely on `grab_approximate_rows` to tell exact interval counts from estimates.
+async def test_async_grab_reports_approximate_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    results = iter([["1008b5110100 / 09abcdef0000000000 = 2"], ["f108b5110100 / 09abcdef0000000000 = 5"]])
+
+    # Intent: serve a baseline and a final snapshot whose only row changed master address.
+    # Why: this is the shape that used to discard the whole capture and is now kept as an estimate.
+    async def _grab_cmd(host, port, command, ensure_active=None, on_grab_started=None):
+        return ["grab continued"] if command == "grab" else next(results)
+
+    monkeypatch.setattr(DUMP, "_grab_cmd", _grab_cmd)
+    capture = await DUMP.async_grab("127.0.0.1", 8888, 0)
+
+    assert capture.lines[-1] == "f108b5110100 / 09abcdef0000000000 = 3"
+    assert capture.approximate_rows == ("f108b5110100 / 09abcdef0000000000",)
+
+
+# Intent: pin that a family with a stable, a replaced and an added row spreads growth over both new rows.
+# Why: the split is a documented guess; each row is capped by its own cumulative count so it never exceeds it.
+def test_grab_delta_caps_estimated_rows_at_their_own_count() -> None:
+    baseline = DUMP._validate_grab_result_response(["f108b5240100 / 00 = 2: ctlv3 Z1OpMode"])
+    final = DUMP._validate_grab_result_response(
+        ["f108b5240101 / 01 = 1: ctlv3 Z1OpMode", "f108b5240102 / 02 = 20: ctlv3 Z1OpMode"]
+    )
+    approximate: list[str] = []
+
+    assert DUMP._grab_result_delta(baseline, final, approximate) == [
+        "f108b5240101 / 01 = 1: ctlv3 Z1OpMode",
+        "f108b5240102 / 02 = 10: ctlv3 Z1OpMode",
+    ]
+    assert approximate == ["f108b5240101 / 01", "f108b5240102 / 02"]
+
+
 # Intent: expose the global grab reset/refill case that count snapshots cannot distinguish.
 # Why: the dump metadata must state this upstream limitation instead of claiming exact isolation.
 def test_grab_delta_documents_unobservable_external_reset_refill() -> None:
@@ -1449,6 +1595,7 @@ async def test_export_dump_records_continued_capture_metadata(
                 lines=("[grab] grab continued", "10feb51603016019 / 00 = 2"),
                 status="continued",
                 duration=1.25,
+                approximate_rows=("10feb51603016019 / 00",),
             )
         ),
     )
@@ -1464,6 +1611,7 @@ async def test_export_dump_records_continued_capture_metadata(
     assert metadata["grab_captured_duration"] == 1.25
     assert metadata["grab_capture_method"] == "count_delta"
     assert "no grab epoch" in metadata["grab_capture_limitation"]
+    assert metadata["grab_approximate_rows"] == ["10feb51603016019 / 00"]
     assert dump_data["grab"] == ["[grab] grab continued", "10feb51603016019 / 00 = 2"]
 
 
@@ -1500,6 +1648,7 @@ async def test_export_dump_marks_zero_second_capture_as_not_requested(
     metadata = DUMP.yaml.safe_load(dump_path.read_text())["metadata"]
     assert metadata["grab_duration"] == 0
     assert metadata["grab_status"] == "not_requested"
+    assert "grab_approximate_rows" not in metadata
     assert metadata["grab_captured_duration"] == 0
     assert metadata["grab_capture_method"] == "none"
     assert "grab_error" not in metadata

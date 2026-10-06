@@ -12,7 +12,7 @@ import tempfile
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1780,6 +1780,77 @@ async def test_runtime_definitions_resolve_logical_circuits() -> None:
         assert all(",hmu," not in definition for definition in definitions)
 
 
+# Intent: B524 runtime definitions are never defined on a BAI boiler interface that merely owns control registers.
+# Why: issue #179 - on a VRC350 (35000) bus the only controller-typed circuit is `bai`; B524 is the VRC700-family
+# protocol, the controller answers `00`, and the `r5` poll definitions then log `ERR: invalid position` forever.
+async def test_issue179_b524_definitions_skip_bai_boiler_interface() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/vrc350_issue179_2026-10-06_082936_discovery.yaml")
+        )
+        assert c._graph.heating_controller_result().circuit == "bai"
+
+        await c._define_custom_registers()
+
+        definitions = [call.args[0] for call in c.ebus.define_register.await_args_list]
+        assert all("B524" not in definition.upper() for definition in definitions), definitions
+        # The unrelated BAI B510/B509 write definitions for the same circuit stay available.
+        assert any(",bai,HeatingSwitch," in definition for definition in definitions)
+
+
+# Intent: the fallback read must not probe registers whose B524 definition was withheld on a BAI boiler interface.
+# Why: issue #179 review - before any error line is cached, the map-driven pass still read them once per cycle.
+async def test_issue179_fallback_read_skips_withheld_b524_registers() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.last_find_usable = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c.ebus.read_register = AsyncMock(return_value=None)
+        lines = [
+            line
+            for line in load_find_lines("community/vrc350_issue179_2026-10-06_082936_discovery.yaml")
+            if not line.startswith(("bai z1RoomHumidity", "bai ManualCooling"))
+        ]
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+        c._refresh_find_keys()
+        await c._define_custom_registers()
+
+        await c._fallback_read()
+
+        read = {(call.args[0], call.args[1]) for call in c.ebus.read_register.await_args_list}
+        withheld = {("bai", "z1RoomHumidity"), ("bai", "ManualCoolingStartDate"), ("bai", "ManualCoolingEndDate")}
+        assert not withheld & read
+
+
+# Intent: B524 runtime definitions still reach a real VRC700-family controller.
+# Why: the BAI gate for issue #179 must not drop `ctlv2.z1RoomHumidity` for controllers that answer B524.
+async def test_b524_definitions_still_defined_on_ctlv2_controller() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c.ebus = AsyncMock()
+        c.ebus.is_connected = True
+        c.ebus.define_register = AsyncMock(return_value="done")
+        c._graph = DISCOVERY.DiscoveryService.build_device_graph(
+            [
+                "scan.15 = Vaillant;CTLV2;0507;6903",
+                "ctlv2 Z1OpMode = auto",
+                "bai HwcTempDesired = 50",
+                "scan.08 = Vaillant;BAI00;0202;9602",
+            ]
+        )
+
+        await c._define_custom_registers()
+
+        definitions = [call.args[0] for call in c.ebus.define_register.await_args_list]
+        assert any(",ctlv2,z1RoomHumidity," in definition for definition in definitions), definitions
+
+
 # Intent: runtime controller definitions resolve ctlv4 exactly like the historical ctlv2 alias.
 # Why: controller numbering must not change runtime ownership behavior.
 async def test_runtime_definitions_resolve_ctlv4_owner() -> None:
@@ -2513,6 +2584,42 @@ async def test_initial_discovery_keeps_runtime_defined_placeholder_entities(
         assert bool(kept) is expected_kept
         if kept:
             assert kept[0].enabled_by_default is True and kept[0].raw_value == ""
+
+
+# Intent: a runtime-defined register that ebusd's find does not list at all keeps its cached entity and registry state.
+# Why: issue #171 - `vwzio.PowerConsumptionVwz` was pruned as stale and set to disabled_by=integration, the fallback
+# read then re-enabled it, and each disabled_by change made Home Assistant reload the whole config entry.
+@pytest.mark.parametrize(("runtime_defined", "expected_kept"), [(True, True), (False, False)])
+async def test_initial_discovery_keeps_runtime_defined_register_absent_from_find(
+    runtime_defined: bool, expected_kept: bool
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        lines = ["scan.76 = Vaillant;VWZIO;0500;0504", "vwzio PowerConsumptionVwz = 0.005"]
+        c.registers["vwzio.PowerConsumptionVwz"] = EbusdRegister(
+            circuit="vwzio", name="PowerConsumptionVwz", fields=["value"], value={"value": "0.005"}, has_data=True
+        )
+        c.entities = c.entity_factory.generate(DISCOVERY.DiscoveryService.build_device_graph(lines))
+        if runtime_defined:
+            c._runtime_definitions["u.vwzio.PowerConsumptionVwz"] = "u,vwzio,PowerConsumptionVwz"
+        graph = DISCOVERY.DiscoveryService.build_device_graph(["scan.76 = Vaillant;VWZIO;0500;0504"])
+        assert "vwzio.PowerConsumptionVwz" not in graph.placeholder_registers
+        assert "vwzio.PowerConsumptionVwz" not in graph.raw_registers
+
+        with patch.object(COORDINATOR, "_disable_stale_registry_entities") as disable:
+            await c._apply_discovery_graph(graph, "initial")
+
+        assert ("vwzio.PowerConsumptionVwz" in c.registers) is expected_kept
+        if runtime_defined:
+            # A previous-session value must not be shown as current while no telegram arrived since `define`.
+            assert c.registers["vwzio.PowerConsumptionVwz"].has_data is False
+            assert [e.raw_value for e in c.entities if e.name == "PowerConsumptionVwz"] == [""]
+            # A later poll or read must bring the register back, as the fallback read does when data arrives.
+            c.registers["vwzio.PowerConsumptionVwz"].value = {"value": "0.0104"}
+            c.registers["vwzio.PowerConsumptionVwz"].has_data = True
+            assert c.registers["vwzio.PowerConsumptionVwz"].has_data is True
+        assert any(e.name == "PowerConsumptionVwz" for e in c.entities) is expected_kept
+        assert disable.called is not expected_kept
 
 
 # Intent: B524 state metadata does not preserve cache-only values without safe fallback reads.
@@ -5856,6 +5963,48 @@ async def test_disable_no_data_preserves_user_enabled_optional_entities() -> Non
         )
         # Only the default-enabled no-data entity is disabled.
         assert updated == ["sensor.default_no_data"]
+
+
+# Intent: a default-enabled entity of a register the integration defined itself keeps its registry state without data.
+# Why: issues #171/#175 - every disabled_by flip makes Home Assistant reload the whole entry, and a passive register
+# has no value until the gateway's next telegram.
+async def test_disable_no_data_skips_runtime_defined_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+
+        class _Description:
+            def __init__(self, circuit: str, name: str) -> None:
+                self.circuit = circuit
+                self.name = name
+                self.unique_id = f"ebusd_{circuit}_{name.lower()}"
+                self.enabled_by_default = True
+                self.raw_value = ""
+
+        class _Entry:
+            def __init__(self, uid: str) -> None:
+                self.unique_id = uid
+                self.config_entry_id = "entry-1"
+                self.disabled_by = None
+
+        updated: list[str] = []
+        registry = MagicMock()
+        registry.entities = {
+            "sensor.defined": _Entry("ebusd_vwzio_powerconsumptionvwz"),
+            "sensor.other": _Entry("ebusd_hmu_outsidetemp"),
+        }
+        registry.async_update_entity = MagicMock(side_effect=lambda entity_id, **kwargs: updated.append(entity_id))
+        from homeassistant.helpers import entity_registry
+
+        monkeypatch.setattr(entity_registry, "async_get", MagicMock(return_value=registry))
+        entry = _entry()
+        entry.entry_id = "entry-1"
+        c = VaillantCoordinator(_hass(tmpdir), entry)
+        c._runtime_definitions["u.vwzio.PowerConsumptionVwz"] = "u,vwzio,PowerConsumptionVwz"
+
+        c._disable_no_data_registry_entities(
+            [_Description("vwzio", "PowerConsumptionVwz"), _Description("hmu", "OutsideTemp")]
+        )
+
+        assert updated == ["sensor.other"]
 
 
 # Intent: the shared find-line parser must keep no-data sentinels out of the
