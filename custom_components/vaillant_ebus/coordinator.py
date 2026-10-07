@@ -279,7 +279,14 @@ def _is_heat_pump_only_cache_register(register_key: str, graph: DeviceGraph) -> 
     twins = _enabled_map_entry_circuits(register_key)
     if not twins or not all(is_heat_pump_circuit(twin) for twin in twins):
         return False
-    return graph.heat_pump_result().status == ResolutionStatus.MISSING
+    if graph.heat_pump_result().status != ResolutionStatus.MISSING:
+        return False
+    # A heat pump that has not answered its scan yet (ebusd just restarted) must not look like a boiler-only bus:
+    # require a completed BAI boiler scan and no HMU/HMUX scan at all, as discovery does for the boiler-only alias.
+    scan_types = [identity.scan_type.casefold() for identity in graph.scan_identities]
+    has_boiler_scan = any(scan_type.startswith("bai") for scan_type in scan_types)
+    has_heat_pump_scan = any(scan_type.startswith("hmu") for scan_type in scan_types)
+    return has_boiler_scan and not has_heat_pump_scan
 
 
 # Intent: detect placeholders that metadata explicitly forbids polling or exposing.

@@ -327,9 +327,9 @@ class EntityFactoryService:
                     base_meta.entity_type = "select"
                     base_meta.entity_category = "config"
 
-                # Some controllers (BASS3, issue #152) report this threshold as text such as `thermostat`; a unit on
-                # a text value makes the sensor report unknown, so the unit only applies to numeric readings.
-                if re.fullmatch(r"hc\d+roomtempswitchon", name_lower) and raw and not _is_numeric(raw):
+                # The threshold is an ebusd enum (`off`, `modulating`, `thermostat`), never a temperature (issue #152);
+                # a unit on a text value makes the sensor report unknown, and the first reading may still be empty.
+                if re.fullmatch(r"hc\d+roomtempswitchon", name_lower):
                     base_meta.unit = ""
                     base_meta.device_class = ""
 

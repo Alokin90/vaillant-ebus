@@ -6,15 +6,15 @@
 
 - Remove the frozen energy sensors on a gas boiler with a BASS3 (issue #152). The integration kept old cached
   `Stat*EnergySum*` values (electric, environment, solar) for the boiler interface and the controller, although the
-  bus no longer lists them and there is no heat pump to read them from. They showed 0 or odd values and came back
-  after removing and adding the integration. Such cached values are now dropped when no heat pump exists. Registers
-  that the bus lists are not touched.
-- Show the room temperature threshold (`Hc1/2/3RoomTempSwitchOn`) as text. The controller reports `thermostat`,
-  `modulating` or `off`, but the sensor had a temperature unit, so it stayed `unknown`. Numeric values keep the unit.
+  bus does not list them and there is no heat pump to read them from. They showed 0 or odd values. When the bus has a
+  boiler scan and no heat-pump scan, these cached values are now dropped at start, and their entities are switched
+  off in the registry. Registers that the bus lists, and systems with a heat pump, are not touched.
+- Show the room temperature threshold (`Hc1/2/3RoomTempSwitchOn`) as text without a unit. It is an enum with the
+  values `off`, `modulating` and `thermostat`, but the sensor had a temperature unit, so it stayed `unknown`.
 - Stop the `prepare message part 0: ERR: end of input reached` errors on the bus (issue #182). The integration read
   `Errorhistory` about every 40 seconds, but ebusd needs an `index` for that message, so every read failed and ebusd
-  logged a bus error. `Errorhistory` is no longer read by the fallback read. Thanks to the reporter for the clear
-  trace and the test.
+  logged a bus error. `Errorhistory` is no longer read. An "Error History" entity that never had a value is removed
+  with this change. Thanks to the reporter for the clear trace and the test.
 - The DHW away switch and the zone away switch show `off` when the holiday start date is the "not set" date, even if
   the end date cannot be read. Before, they stayed `unknown`. Missing data still gives `unknown`.
 
@@ -22,7 +22,7 @@
 
 - The boiler status message temperatures are named "Flow Temperature (Status message)" and "Storage Temperature
   (Status message)", so they are no longer confused with the separate flow and storage temperature sensors. Entity
-  ids of existing installations do not change.
+  ids of existing installations do not change. The storage variant is off by default.
 - The climate entity of extra zones is named "Climate" and the flow range "Flow Temperature Range". The zone device
   already carries the zone name, which gave ids such as `climate.zone_2_zone_2` on new installations. Existing entity
   ids do not change.

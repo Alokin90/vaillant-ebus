@@ -1012,3 +1012,11 @@ async def test_extra_zone_entity_names_do_not_repeat_the_device_name() -> None:
         coordinator = _coordinator(tmpdir, _graph_two_zone(full_parity=True))
         assert EbusdClimate(coordinator, _entry(), "z2", "ctlv2")._attr_name == "Climate"
         assert EbusdClimate(coordinator, _entry(), "z1", "ctlv2")._attr_name == "Home"
+
+
+# Intent: the flow temperature range entity of an extra zone drops the repeated "Zone N" suffix too.
+# Why: issue #152 - the device already carries the zone name.
+async def test_extra_zone_flow_range_name_does_not_repeat_the_device_name() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        coordinator = _coordinator(tmpdir, _graph_two_zone(full_parity=True))
+        assert CLIMATE.EbusdFlowTempRange(coordinator, _entry(), "z2", "ctlv2")._attr_name == "Flow Temperature Range"

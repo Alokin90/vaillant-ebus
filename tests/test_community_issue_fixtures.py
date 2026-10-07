@@ -824,3 +824,15 @@ def test_issue152_boiler_status_temperatures_have_distinct_names() -> None:
     assert entities["bai.Status01.temp"].meta.friendly_name == "Flow Temperature (Status message)"
     assert entities["bai.Status01.temp_4"].meta.friendly_name == "Storage Temperature (Status message)"
     assert entities["bai.Status01.temp_1"].meta.friendly_name == "Return Temperature"
+
+
+# Intent: the threshold is unitless even when its first reading is empty, because the unit is fixed at construction.
+# Why: review finding on #152 - an idle controller that later reports `thermostat` would otherwise stay unknown.
+def test_issue152_room_temp_threshold_is_unitless_before_the_first_text_reading() -> None:
+    lines = [
+        "bass Hc1RoomTempSwitchOn = no data stored" if "Hc1RoomTempSwitchOn" in line else line
+        for line in _f34_cache_find_lines()
+    ]
+    entities = {e.key: e for e in EntityFactoryService().generate(DiscoveryService.build_device_graph(lines))}
+
+    assert entities["bass.Hc1RoomTempSwitchOn.value"].meta.unit == ""

@@ -6496,3 +6496,20 @@ async def test_runtime_defined_register_recovers_value_through_poll() -> None:
         assert c.registers["vwzio.PowerConsumptionVwz"].has_data is True
         assert c.registers["vwzio.PowerConsumptionVwz"].value["value"] == "0.0104"
         assert state["ebusd"]["vwzio.PowerConsumptionVwz.value"] == "0.0104"
+
+
+# Intent: the heat-pump-only prune rule does not fire whenever a heat pump might exist: late scan or no scan at all.
+# Why: review finding on #152 - only a completed boiler scan without any HMU scan proves a boiler-only bus.
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["scan.08 = Vaillant;HMU00;0904;5103", "scan.15 = Vaillant;BASS3;0708;4304"],
+        ["scan.08 = Vaillant;BAI00;0503;9602", "scan.10 = Vaillant;HMU00;0904;5103"],
+        ["bass YieldTotal = 0"],
+    ],
+    ids=["hmu-scan-without-boiler", "boiler-and-hmu-scan", "no-scan-at-all"],
+)
+def test_cache_only_heat_pump_energy_rows_survive_without_boiler_only_proof(lines: list[str]) -> None:
+    graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+
+    assert COORDINATOR._is_heat_pump_only_cache_register("bass.StatElectricEnergySum", graph) is False
