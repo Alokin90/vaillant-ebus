@@ -655,7 +655,7 @@ def test_pr164_ctlv0_dump_exposes_controls_and_keeps_absent_path_safe() -> None:
     setback = entities["ctlv0.Hc1SetbackMode.value"]
     assert setback.entity_type == "select"
     assert setback.meta.writable is True
-    assert setback.meta.options == ["normal", "comfort"]
+    assert setback.meta.options == ["eco", "normal"]
 
     offset = entities["ctlv0.OffsetOutsideTemp.value"]
     assert offset.entity_type == "number"

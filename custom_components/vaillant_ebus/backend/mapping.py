@@ -1612,7 +1612,7 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Setback Mode (HC1)",
         icon="mdi:thermostat-auto",
         writable=True,
-        options=["normal", "comfort"],
+        options=["eco", "normal"],
         entity_type="select",
         entity_category="config",
     ),
