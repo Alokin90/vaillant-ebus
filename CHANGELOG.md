@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.11.1 - 2026-10-07
+
+### Fixed
+
+- Remove the frozen energy sensors on a gas boiler with a BASS3 (issue #152). The integration kept old cached
+  `Stat*EnergySum*` values (electric, environment, solar) for the boiler interface and the controller, although the
+  bus no longer lists them and there is no heat pump to read them from. They showed 0 or odd values and came back
+  after removing and adding the integration. Such cached values are now dropped when no heat pump exists. Registers
+  that the bus lists are not touched.
+- Show the room temperature threshold (`Hc1/2/3RoomTempSwitchOn`) as text. The controller reports `thermostat`,
+  `modulating` or `off`, but the sensor had a temperature unit, so it stayed `unknown`. Numeric values keep the unit.
+- The DHW away switch and the zone away switch show `off` when the holiday start date is the "not set" date, even if
+  the end date cannot be read. Before, they stayed `unknown`. Missing data still gives `unknown`.
+
+### Changed
+
+- The boiler status message temperatures are named "Flow Temperature (Status message)" and "Storage Temperature
+  (Status message)", so they are no longer confused with the separate flow and storage temperature sensors. Entity
+  ids of existing installations do not change.
+- The climate entity of extra zones is named "Climate" and the flow range "Flow Temperature Range". The zone device
+  already carries the zone name, which gave ids such as `climate.zone_2_zone_2` on new installations. Existing entity
+  ids do not change.
+- Fix the options of the HC1 setback mode select to `eco` and `normal` (pull request #174, thanks to Alokin90).
+
+### Not changed
+
+- Holiday date entities stay `unknown` while no holiday is set; Home Assistant date entities cannot show "not set".
+- Flow, return and outside temperature sensors that the boiler interface does not answer stay unavailable.
+- VR_70 values, cooling dates on a gas boiler and the broadcast outside temperature need more evidence first.
+
 ## 1.11.0 - 2026-10-06
 
 ### Fixed

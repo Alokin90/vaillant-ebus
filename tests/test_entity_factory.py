@@ -347,7 +347,9 @@ class TestEntityGeneration:
         assert graph.heating_controller_result().node.scan_type == "CTLV2"
         assert entity.entity_type == "sensor"
         assert entity.meta.writable is False
-        assert entity.meta.unit == "°C"
+        # The capture reports text (`modulating`), so the unit is dropped; a unit on text made the sensor unknown.
+        assert entity.raw_value == "modulating"
+        assert entity.meta.unit == ""
         assert entity.meta.options is None
 
     # Intent: a no-data CTLV2 value retains the established sensor entity in HA.

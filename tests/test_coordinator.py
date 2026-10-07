@@ -6412,3 +6412,24 @@ async def test_initial_discovery_prunes_cache_zone_register_duplicated_under_ano
         await c._apply_discovery_graph(graph, "initial")
 
         assert ("bai.z1RoomHumidity" in c.registers) is expected_kept
+
+
+# Intent: cache-only boiler/controller energy rows that only borrow heat-pump metadata are dropped without a heat pump.
+# Why: issue #152 - a gas-boiler F34 kept 22 `Stat*EnergySum*` cache rows that no read can refresh, so removing and
+# re-adding the integration still showed frozen zero or implausible energy entities.
+@pytest.mark.parametrize(
+    ("with_heat_pump", "expected_supported"),
+    [(False, False), (True, True)],
+)
+def test_cache_only_heat_pump_energy_rows_need_a_heat_pump(with_heat_pump: bool, expected_supported: bool) -> None:
+    lines = load_find_lines("community/saunier_duval_f34_issue152_2026-10-02_194815_discovery.yaml")
+    if with_heat_pump:
+        lines = [*lines, "scan.08 = Vaillant;HMU00;0904;5103", "hmu OutsideTemp = 18.5"]
+    graph = DISCOVERY.DiscoveryService.build_device_graph(lines)
+    cached = ("bai.StatElectricEnergySum", "bass.StatElectricEnergySumHc", "bai.StatSolarEnergySum")
+
+    for key in cached:
+        assert key.casefold() not in {raw.casefold() for raw in graph.raw_registers}
+        assert COORDINATOR._cache_register_is_supported(key, set(), graph) is expected_supported
+    # Registers the bus lists live are never touched by this rule.
+    assert COORDINATOR._cache_register_is_supported("bass.PrEnergySumHc", set(), graph) is True

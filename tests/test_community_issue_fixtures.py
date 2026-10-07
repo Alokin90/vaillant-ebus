@@ -794,3 +794,33 @@ def test_discussion31_e7000_without_config_creates_no_controller_entities() -> N
 
     assert not [entity for entity in entities if entity.name.lower().startswith(("z1", "hc1"))]
     assert graph.heating_controller_result().node is None
+
+
+# Intent: F34 issue #152 - text-valued room-temperature thresholds carry no unit so the sensor shows the text.
+# Why: `thermostat`/`modulating` with unit="°C" made the sensor return None, so it showed Unknown forever.
+def test_issue152_room_temp_threshold_is_unitless_text_sensor() -> None:
+    entities = {
+        entity.key: entity
+        for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(_f34_cache_find_lines()))
+    }
+
+    for key, expected in (
+        ("bass.Hc1RoomTempSwitchOn.value", "thermostat"),
+        ("bass.Hc2RoomTempSwitchOn.value", "modulating"),
+    ):
+        assert entities[key].meta.unit == ""
+        assert entities[key].raw_value == expected
+
+
+# Intent: F34 issue #152 - the boiler Status01 temperatures are named apart from the dedicated bai registers.
+# Why: "Flow Temperature" and "Storage Temperature" appeared twice with different values and a `_2` suffix.
+def test_issue152_boiler_status_temperatures_have_distinct_names() -> None:
+    entities = {
+        entity.key: entity
+        for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(_f34_cache_find_lines()))
+    }
+
+    assert entities["bai.FlowTemp.value"].meta.friendly_name == "Flow Temperature"
+    assert entities["bai.Status01.temp"].meta.friendly_name == "Flow Temperature (Status message)"
+    assert entities["bai.Status01.temp_4"].meta.friendly_name == "Storage Temperature (Status message)"
+    assert entities["bai.Status01.temp_1"].meta.friendly_name == "Return Temperature"

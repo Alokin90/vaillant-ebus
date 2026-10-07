@@ -327,6 +327,12 @@ class EntityFactoryService:
                     base_meta.entity_type = "select"
                     base_meta.entity_category = "config"
 
+                # Some controllers (BASS3, issue #152) report this threshold as text such as `thermostat`; a unit on
+                # a text value makes the sensor report unknown, so the unit only applies to numeric readings.
+                if re.fullmatch(r"hc\d+roomtempswitchon", name_lower) and raw and not _is_numeric(raw):
+                    base_meta.unit = ""
+                    base_meta.device_class = ""
+
                 # Date-like empty sentinel is not a supported entity value;
                 # unlike normal no-data placeholders it cannot become useful
                 # through later polling and should not create a device.

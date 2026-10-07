@@ -1003,3 +1003,12 @@ async def test_available_tracks_coordinator() -> None:
         coordinator = _coordinator(tmpdir, _graph_two_zone())
         z2 = EbusdClimate(coordinator, _entry(), "z2", "ctlv2")
         assert z2.available is True
+
+
+# Intent: extra zones are named "Climate" and "Flow Temperature Range" inside their own "Zone N" device.
+# Why: issue #152 - "Zone 2" inside the "Zone 2" device produced the entity id climate.zone_2_zone_2.
+async def test_extra_zone_entity_names_do_not_repeat_the_device_name() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        coordinator = _coordinator(tmpdir, _graph_two_zone(full_parity=True))
+        assert EbusdClimate(coordinator, _entry(), "z2", "ctlv2")._attr_name == "Climate"
+        assert EbusdClimate(coordinator, _entry(), "z1", "ctlv2")._attr_name == "Home"

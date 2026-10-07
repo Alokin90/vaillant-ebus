@@ -195,6 +195,9 @@ class AwayModeSwitch(CoordinatorEntity[VaillantCoordinator], SwitchEntity):
             return None
         start = get_register_value(self.coordinator, circuit, f"{self._zn}HolidayStartPeriod")
         end = get_register_value(self.coordinator, circuit, f"{self._zn}HolidayEndPeriod")
+        # An explicit "unset" start date already proves away mode is off, even when the end register is unreadable.
+        if start in UNSET_DATES:
+            return False
         if start is None or end is None:
             return None
         return _is_holiday_active(start, end)
@@ -313,6 +316,9 @@ class HwcAwayModeSwitch(CoordinatorEntity[VaillantCoordinator], SwitchEntity):
             return None
         start = get_register_value(self.coordinator, circuit, "HwcHolidayStartPeriod")
         end = get_register_value(self.coordinator, circuit, "HwcHolidayEndPeriod")
+        # An explicit "unset" start date already proves away mode is off, even when the end register is unreadable.
+        if start in UNSET_DATES:
+            return False
         if start is None or end is None:
             return None
         return _is_holiday_active(start, end)

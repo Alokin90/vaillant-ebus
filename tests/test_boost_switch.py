@@ -524,3 +524,17 @@ def test_tank_present_on_off() -> None:
 
     c.data["ebusd"]["basv.HwcStorageTemp.value"] = "(empty for 3115b52406020001000500 / 0800010500ffffff7f)"
     assert EbusdTankPresentSensor(c, _entry()).is_on is False
+
+
+# Intent: an explicit unset DHW holiday start date means away mode is off even when the end register is unreadable.
+# Why: issue #152 - the BASS3 answers `ERR` for HwcHolidayEndPeriod, so the switch stayed Unknown instead of off.
+def test_hwc_away_switch_is_off_when_start_is_unset_and_end_is_missing() -> None:
+    c = _coordinator(dhw_boost_desired=False, sfmode="auto")
+    c.heating_circuit = "bass"
+    c.data["ebusd"] = {"bass.HwcHolidayStartPeriod.value": "01.01.2019"}
+
+    assert HwcAwayModeSwitch(c, _entry()).is_on is False
+
+    # Genuinely missing data stays unknown.
+    c.data["ebusd"] = {}
+    assert HwcAwayModeSwitch(c, _entry()).is_on is None

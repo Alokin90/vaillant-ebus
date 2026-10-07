@@ -495,6 +495,18 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         entity_type="binary_sensor",
         entity_category="diagnostic",
     ),
+    # Boiler interface: bai.FlowTemp/StorageTemp are separate registers, so name the Status01 twins apart (issue #152).
+    "bai.Status01.temp": RegisterMeta(
+        friendly_name="Flow Temperature (Status message)",
+        device_class="temperature",
+        unit="°C",
+    ),
+    "bai.Status01.temp_4": RegisterMeta(
+        friendly_name="Storage Temperature (Status message)",
+        device_class="temperature",
+        unit="°C",
+        enabled=False,
+    ),
     "hmux0.Status01": RegisterMeta(
         friendly_name="Status",
         icon="mdi:information",
