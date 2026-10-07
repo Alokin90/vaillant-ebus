@@ -1,0 +1,2 @@
+# Community captures are hashed byte for byte (tests/test_fixture_integrity.py), so git must never convert their line endings.
+tests/fixtures/** -text
