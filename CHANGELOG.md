@@ -11,6 +11,10 @@
   that the bus lists are not touched.
 - Show the room temperature threshold (`Hc1/2/3RoomTempSwitchOn`) as text. The controller reports `thermostat`,
   `modulating` or `off`, but the sensor had a temperature unit, so it stayed `unknown`. Numeric values keep the unit.
+- Stop the `prepare message part 0: ERR: end of input reached` errors on the bus (issue #182). The integration read
+  `Errorhistory` about every 40 seconds, but ebusd needs an `index` for that message, so every read failed and ebusd
+  logged a bus error. `Errorhistory` is no longer read by the fallback read. Thanks to the reporter for the clear
+  trace and the test.
 - The DHW away switch and the zone away switch show `off` when the holiday start date is the "not set" date, even if
   the end date cannot be read. Before, they stayed `unknown`. Missing data still gives `unknown`.
 

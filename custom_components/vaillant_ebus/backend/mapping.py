@@ -2256,6 +2256,8 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Error History",
         icon="mdi:alert-circle-outline",
         entity_category="diagnostic",
+        # Needs a master `index` field; a parameterless `read` fails with "end of input reached" (issue #182).
+        fallback_read=False,
     ),
     # cctimer (Schedule) — mark as diagnostic for now
     "ctlv2.CcTimer_Config": RegisterMeta(
@@ -2557,6 +2559,8 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Error History",
         icon="mdi:history",
         entity_category="diagnostic",
+        # Needs a master `index` field; a parameterless `read` fails with "end of input reached" (issue #182).
+        fallback_read=False,
     ),
     "vr_71.Clearerrorhistory": RegisterMeta(
         friendly_name="Clear Error History",

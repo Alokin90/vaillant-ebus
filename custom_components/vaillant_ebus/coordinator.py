@@ -506,6 +506,9 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         self._last_energy_poll = datetime.min
         self._runtime_definitions: dict[str, str] = {}
         # (circuit, name) pairs whose runtime definition was withheld because the owner cannot answer it.
+        # Rebuilt by every `_define_custom_registers` run, which follows each connect and reconnect. It must survive
+        # between polls (the fallback read consults it) and must not be cleared with `_runtime_definitions`, or a poll
+        # before the next define would read the withheld registers again.
         self._withheld_runtime_registers: set[tuple[str, str]] = set()
         self._write_log: list[dict] = []  # recent write attempts (verification/telegram diag)
         self._cancel_set_mode_override: Callable[[], None] | None = None

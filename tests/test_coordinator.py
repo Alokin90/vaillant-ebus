@@ -6433,3 +6433,66 @@ def test_cache_only_heat_pump_energy_rows_need_a_heat_pump(with_heat_pump: bool,
         assert COORDINATOR._cache_register_is_supported(key, set(), graph) is expected_supported
     # Registers the bus lists live are never touched by this rule.
     assert COORDINATOR._cache_register_is_supported("bass.PrEnergySumHc", set(), graph) is True
+
+
+# Intent: the fallback read never sends a parameterless `read` for the indexed Errorhistory register.
+# Why: issue #182 - `read -c bai Errorhistory` lacks the master `index` field, so ebusd logged "end of input reached"
+# on the bus every ~40 seconds for as long as the integration ran.
+async def test_issue182_fallback_read_skips_indexed_errorhistory() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        graph = DISCOVERY.DiscoveryService.build_device_graph(
+            load_find_lines("community/saunier_duval_f34_issue152_2026-10-02_194815_discovery.yaml")
+        )
+        coordinator = VaillantCoordinator(_hass(tmpdir), _entry())
+        coordinator.ebus = MagicMock(spec=EbusService)
+        coordinator.ebus.is_connected = True
+        coordinator.ebus.read_register = AsyncMock(return_value=None)
+        coordinator._graph = graph
+        coordinator._last_find_keys = set()
+
+        await coordinator._fallback_read()
+
+        read_names = [call.args[1] for call in coordinator.ebus.read_register.await_args_list]
+        assert "Errorhistory" not in read_names
+        assert MAPPING.REGISTER_MAP["ctlv2.Errorhistory"].fallback_read is False
+        assert MAPPING.REGISTER_MAP["vr_71.Errorhistory"].fallback_read is False
+
+
+# Intent: a runtime-defined passive register that discovery reset to "no data" regains its value on the next poll.
+# Why: reviewer point S3 for #171 - the earlier test restored `has_data` by hand, so it proved nothing about recovery.
+# Passive registers are never read actively, so the telegram the gateway sends must arrive through `find`.
+async def test_runtime_defined_register_recovers_value_through_poll() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        c = VaillantCoordinator(_hass(tmpdir), _entry())
+        c._cache_seeded = True
+        c._ebusd_connected = True
+        c.ebus = MagicMock(spec=EbusService)
+        c.ebus.is_connected = True
+        c.ebus.last_find_usable = True
+        c.ebus.read_register = AsyncMock(return_value=None)
+        c.registers["vwzio.PowerConsumptionVwz"] = EbusdRegister(
+            circuit="vwzio", name="PowerConsumptionVwz", fields=["value"], value={"value": "0.005"}, has_data=True
+        )
+        cached = DISCOVERY.DiscoveryService.build_device_graph(
+            ["scan.76 = Vaillant;VWZIO;0500;0504", "vwzio PowerConsumptionVwz = 0.005"]
+        )
+        c.entities = c.entity_factory.generate(cached)
+        c._runtime_definitions["u.vwzio.PowerConsumptionVwz"] = (
+            "u,vwzio,PowerConsumptionVwz,PowerConsumptionVwz,31,76,B516,14"
+        )
+        graph = DISCOVERY.DiscoveryService.build_device_graph(["scan.76 = Vaillant;VWZIO;0500;0504"])
+
+        with patch.object(COORDINATOR, "_disable_stale_registry_entities"):
+            await c._apply_discovery_graph(graph, "initial")
+        assert c.registers["vwzio.PowerConsumptionVwz"].has_data is False
+        assert [e.raw_value for e in c.entities if e.name == "PowerConsumptionVwz"] == [""]
+
+        # The gateway sends the telegram, so the next `find` lists the value.
+        c.ebus.find_registers = AsyncMock(
+            return_value=["scan.76 = Vaillant;VWZIO;0500;0504", "vwzio PowerConsumptionVwz = 0.0104"]
+        )
+        state = await c._async_update_data()
+
+        assert c.registers["vwzio.PowerConsumptionVwz"].has_data is True
+        assert c.registers["vwzio.PowerConsumptionVwz"].value["value"] == "0.0104"
+        assert state["ebusd"]["vwzio.PowerConsumptionVwz.value"] == "0.0104"
