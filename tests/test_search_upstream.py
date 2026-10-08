@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "tools/search_upstream.sh"
 
 
+# Intent: write a fake shell script with LF endings and the executable bit.
+# Why: Path.write_text turns a newline into CRLF on Windows, which breaks the shebang line of a POSIX script.
+def _write_script(path: Path, content: str) -> None:
+    path.write_bytes(content.encode("utf-8"))
+    path.chmod(0o755)
+
+
+# The fake gh pipes through jq, so the wrapper tests cannot run on a machine without it.
+requires_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed")
+
+
 def _fake_gh(tmp_path: Path) -> tuple[dict[str, str], Path]:
     log = tmp_path / "gh-args.log"
     executable = tmp_path / "gh"
-    executable.write_text(
+    _write_script(
+        executable,
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> '{log}'\n"
         "kind=$2\n"
@@ -28,9 +43,9 @@ def _fake_gh(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "fi\n"
         'printf \'%s\\n\' "$json" | jq -r "$jq_expression"\n'
     )
-    executable.chmod(0o755)
     env = os.environ.copy()
-    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    # os.pathsep keeps the fake gh first on Windows too, where a ":" would split the drive letter of tmp_path.
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
     return env, log
 
 
@@ -40,6 +55,7 @@ def _run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[st
 
 # Intent: default output keeps the existing human-readable headings and spacing.
 # Why: existing manual callers must not change behavior when compact mode is absent.
+@requires_jq
 def test_default_output_remains_human_readable(tmp_path: Path) -> None:
     env, _ = _fake_gh(tmp_path)
     result = _run(["--all", "query"], env)
@@ -58,6 +74,7 @@ def test_default_output_remains_human_readable(tmp_path: Path) -> None:
 
 # Intent: compact output removes decoration while retaining a stable issue/PR marker.
 # Why: agents can consume smaller output without losing result type or source URLs.
+@requires_jq
 def test_compact_output_preserves_result_type(tmp_path: Path) -> None:
     env, log = _fake_gh(tmp_path)
     result = _run(["--all", "--compact", "--comments", "--limit", "2", "--repo", "owner/repo", "query"], env)
@@ -81,6 +98,7 @@ def test_search_wrapper_passes_bash_syntax_check() -> None:
 
 # Intent: the documented positional repository form reaches both search calls.
 # Why: preserve the existing documented wrapper interface while adding compact output.
+@requires_jq
 def test_positional_repository_is_preserved(tmp_path: Path) -> None:
     env, log = _fake_gh(tmp_path)
     _run(["query with spaces", "owner/repo"], env)
@@ -92,6 +110,7 @@ def test_positional_repository_is_preserved(tmp_path: Path) -> None:
 
 # Intent: repeated searches can reuse cached formatted output without calling GitHub again.
 # Why: deep research repeats exact message-ID and payload queries, and cached output avoids secondary rate limits.
+@requires_jq
 def test_cache_dir_reuses_search_output(tmp_path: Path) -> None:
     env, log = _fake_gh(tmp_path)
     cache_dir = tmp_path / "cache"
@@ -108,10 +127,12 @@ def test_cache_dir_reuses_search_output(tmp_path: Path) -> None:
 
 # Intent: transient GitHub rate-limit failures are retried, while unrelated failures are returned immediately.
 # Why: upstream searches are required to survive HTTP 403 secondary limits without hiding real command errors.
+@requires_jq
 def test_rate_limit_failure_is_retried(tmp_path: Path) -> None:
     state = tmp_path / "attempts"
     executable = tmp_path / "gh"
-    executable.write_text(
+    _write_script(
+        executable,
         "#!/bin/sh\n"
         f"count=0; [ -f '{state}' ] && count=$(cat '{state}')\n"
         f"count=$((count + 1)); printf '%s' \"$count\" > '{state}'\n"
@@ -129,9 +150,9 @@ def test_rate_limit_failure_is_retried(tmp_path: Path) -> None:
         "fi\n"
         'printf \'%s\\n\' "$json" | jq -r "$jq_expression"\n'
     )
-    executable.chmod(0o755)
     env = os.environ.copy()
-    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    # os.pathsep keeps the fake gh first on Windows too, where a ":" would split the drive letter of tmp_path.
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
 
     result = _run(["--retry", "1", "--retry-delay", "0", "query"], env)
 
@@ -141,19 +162,21 @@ def test_rate_limit_failure_is_retried(tmp_path: Path) -> None:
 
 # Intent: an unrelated authorization failure is not treated as a transient rate limit.
 # Why: retrying a permanent permission error wastes time and can obscure the real upstream blocker.
+@requires_jq
 def test_unrelated_403_is_not_retried(tmp_path: Path) -> None:
     state = tmp_path / "attempts"
     executable = tmp_path / "gh"
-    executable.write_text(
+    _write_script(
+        executable,
         "#!/bin/sh\n"
         f"count=0; [ -f '{state}' ] && count=$(cat '{state}')\n"
         f"count=$((count + 1)); printf '%s' \"$count\" > '{state}'\n"
         "echo 'HTTP 403: Resource not accessible by integration' >&2\n"
         "exit 1\n"
     )
-    executable.chmod(0o755)
     env = os.environ.copy()
-    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    # os.pathsep keeps the fake gh first on Windows too, where a ":" would split the drive letter of tmp_path.
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
         ["bash", str(SCRIPT), "--retry", "3", "--retry-delay", "0", "query"],

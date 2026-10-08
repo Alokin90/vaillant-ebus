@@ -1,11 +1,5 @@
 # Tests that fail on a Windows checkout for environment reasons only (prefix match, used by tools/validate.py).
 # Do not add tests here to hide real failures; every entry needs a reason.
 
-# git autocrlf rewrites the community fixtures, so their SHA-256 digests differ.
-tests/test_fixture_integrity.py::test_issue161_state_captures_match_source_digests
-
-# The tests drive tools/search_upstream.sh through a POSIX shell that is not available.
-tests/test_search_upstream.py::
-
 # Timing-sensitive; occasionally slow on Windows.
 tests/test_ebus_service.py::test_multiline_response_trickling_hits_total_deadline

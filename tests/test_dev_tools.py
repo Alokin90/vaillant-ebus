@@ -81,7 +81,7 @@ def test_validate_baseline_file_is_loadable() -> None:
 
     baseline = tool.load_baseline()
 
-    assert "tests/test_search_upstream.py::" in baseline
+    assert "tests/test_ebus_service.py::test_multiline_response_trickling_hits_total_deadline" in baseline
     assert all(not item.startswith("#") for item in baseline)
 
 
@@ -95,3 +95,21 @@ def test_fetch_attachments_helpers() -> None:
     assert tool.normalized_digest(b"a\r\nb\r\n") == tool.normalized_digest(b"a\nb\n")
     assert tool.inside_fixtures(tool.FIXTURES / "x.yaml") is True
     assert tool.inside_fixtures(ROOT / "docs") is False
+
+
+# Intent: an accepted SSH host key is written to the user's known_hosts so the next deploy verifies it.
+# Why: AutoAddPolicy alone keeps the key in memory only, so each run asked for trust again (deploy of 1.11.1).
+def test_deploy_persists_accepted_host_key_to_known_hosts(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("deploy_ha")
+    monkeypatch.setattr(tool.Path, "home", classmethod(lambda cls: tmp_path))
+    saved: list[str] = []
+
+    class FakeClient:
+        def save_host_keys(self, path: str) -> None:
+            saved.append(path)
+
+    written = tool.persist_accepted_host_key(FakeClient())
+
+    assert written == tmp_path / ".ssh" / "known_hosts"
+    assert saved == [str(tmp_path / ".ssh" / "known_hosts")]
+    assert written.parent.is_dir()

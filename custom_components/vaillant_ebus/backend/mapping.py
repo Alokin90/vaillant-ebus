@@ -495,6 +495,18 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         entity_type="binary_sensor",
         entity_category="diagnostic",
     ),
+    # Boiler interface: bai.FlowTemp/StorageTemp are separate registers, so name the Status01 twins apart (issue #152).
+    "bai.Status01.temp": RegisterMeta(
+        friendly_name="Flow Temperature (Status message)",
+        device_class="temperature",
+        unit="°C",
+    ),
+    "bai.Status01.temp_4": RegisterMeta(
+        friendly_name="Storage Temperature (Status message)",
+        device_class="temperature",
+        unit="°C",
+        enabled=False,
+    ),
     "hmux0.Status01": RegisterMeta(
         friendly_name="Status",
         icon="mdi:information",
@@ -1618,7 +1630,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc1RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC1)",
-        unit="°C",
     ),
     "ctlv2.Hc1Status": RegisterMeta(
         friendly_name="Status (HC1)",
@@ -1746,7 +1757,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc2RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC2)",
-        unit="°C",
     ),
     "ctlv2.Hc2MixerMovement": RegisterMeta(
         friendly_name="Mixer Movement (HC2)",
@@ -1855,7 +1865,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc3RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC3)",
-        unit="°C",
     ),
     "ctlv2.Hc3MixerMovement": RegisterMeta(
         friendly_name="Mixer Movement (HC3)",
@@ -2244,6 +2253,8 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Error History",
         icon="mdi:alert-circle-outline",
         entity_category="diagnostic",
+        # Needs a master `index` field; a parameterless `read` fails with "end of input reached" (issue #182).
+        fallback_read=False,
     ),
     # cctimer (Schedule) — mark as diagnostic for now
     "ctlv2.CcTimer_Config": RegisterMeta(
@@ -2545,6 +2556,8 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
         friendly_name="Error History",
         icon="mdi:history",
         entity_category="diagnostic",
+        # Needs a master `index` field; a parameterless `read` fails with "end of input reached" (issue #182).
+        fallback_read=False,
     ),
     "vr_71.Clearerrorhistory": RegisterMeta(
         friendly_name="Clear Error History",

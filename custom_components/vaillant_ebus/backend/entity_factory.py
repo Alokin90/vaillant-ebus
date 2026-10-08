@@ -327,6 +327,12 @@ class EntityFactoryService:
                     base_meta.entity_type = "select"
                     base_meta.entity_category = "config"
 
+                # The threshold is an ebusd enum (`off`, `modulating`, `thermostat`), never a temperature (issue #152);
+                # a unit on a text value makes the sensor report unknown, and the first reading may still be empty.
+                if re.fullmatch(r"hc\d+roomtempswitchon", name_lower):
+                    base_meta.unit = ""
+                    base_meta.device_class = ""
+
                 # Date-like empty sentinel is not a supported entity value;
                 # unlike normal no-data placeholders it cannot become useful
                 # through later polling and should not create a device.

@@ -249,17 +249,46 @@ def _usable_register_value(register_key: str, raw: str | None) -> str | None:
 # Intent: report whether a map entry may support a cache-only register.
 # Why: disabled fallback reads must not keep stale B524 values alive after discovery.
 def _register_has_enabled_map_entry(register_key: str) -> bool:
+    return bool(_enabled_map_entry_circuits(register_key))
+
+
+# Intent: list the metadata circuits whose enabled, fallback-read map entry matches a register key.
+# Why: callers need to know which family (controller, heat pump, boiler) supplies the metadata, not just that one does.
+def _enabled_map_entry_circuits(register_key: str) -> list[str]:
     if "." not in register_key:
-        return False
+        return []
     circuit, name = register_key.split(".", 1)
+    matches: list[str] = []
     for alt in metadata_circuits(circuit):
         meta = next(
             (value for key, value in REGISTER_MAP.items() if key.casefold() == f"{alt}.{name}".casefold()),
             None,
         )
         if meta is not None and meta.enabled and meta.fallback_read:
-            return True
-    return False
+            matches.append(alt)
+    return matches
+
+
+# Intent: detect a cache-only register whose only metadata twin belongs to a heat pump that is not on the bus.
+# Why: gas-boiler systems (issue #152, BASS3 + BAI) cached bai/bass Stat*EnergySum rows that borrow hmu metadata; the
+# fallback read can never refresh them without a heat pump, so they would show frozen values forever.
+def _is_heat_pump_only_cache_register(register_key: str, graph: DeviceGraph) -> bool:
+    circuit = register_key.split(".", 1)[0]
+    if is_heat_pump_circuit(circuit):
+        return False
+    twins = _enabled_map_entry_circuits(register_key)
+    if not twins or not all(is_heat_pump_circuit(twin) for twin in twins):
+        return False
+    if graph.heat_pump_result().status != ResolutionStatus.MISSING:
+        return False
+    # A heat pump whose scan row is still blank (ebusd just restarted) is unproven, so it must not look absent.
+    # Require a completed BAI boiler scan and no heat-pump scan row at all, complete or not.
+    if any(not identity.complete for identity in graph.scan_identities):
+        return False
+    scan_types = [identity.scan_type.casefold() for identity in graph.scan_identities]
+    has_boiler_scan = any(scan_type.startswith("bai") for scan_type in scan_types)
+    has_heat_pump_scan = any(scan_type.startswith(("hmu", "hmux")) for scan_type in scan_types)
+    return has_boiler_scan and not has_heat_pump_scan
 
 
 # Intent: detect placeholders that metadata explicitly forbids polling or exposing.
@@ -303,6 +332,8 @@ def _cache_register_is_supported(register_key: str, live_keys: set[str], graph: 
     if register_fold in {key.casefold() for key in live_keys}:
         return True
     if not _register_has_enabled_map_entry(register_key):
+        return False
+    if _is_heat_pump_only_cache_register(register_key, graph):
         return False
     circuit = register_key.split(".", 1)[0]
     if _is_stale_legacy_alias(circuit, graph):
@@ -484,6 +515,9 @@ class VaillantCoordinator(DataUpdateCoordinator[CoordinatorState]):
         self._last_energy_poll = datetime.min
         self._runtime_definitions: dict[str, str] = {}
         # (circuit, name) pairs whose runtime definition was withheld because the owner cannot answer it.
+        # Rebuilt by every `_define_custom_registers` run, which follows each connect and reconnect. It must survive
+        # between polls (the fallback read consults it) and must not be cleared with `_runtime_definitions`, or a poll
+        # before the next define would read the withheld registers again.
         self._withheld_runtime_registers: set[tuple[str, str]] = set()
         self._write_log: list[dict] = []  # recent write attempts (verification/telegram diag)
         self._cancel_set_mode_override: Callable[[], None] | None = None

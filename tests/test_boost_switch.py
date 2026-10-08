@@ -114,7 +114,13 @@ for _name in ("switch", "water_heater", "binary_sensor"):
     _spec.loader.exec_module(_mod)
 
 from vaillant_ebus.binary_sensor import EbusdTankPresentSensor  # noqa: E402
-from vaillant_ebus.switch import EbusdSwitch, HwcAwayModeSwitch, HwcBoostSwitch, _is_holiday_active  # noqa: E402
+from vaillant_ebus.switch import (  # noqa: E402
+    AwayModeSwitch,
+    EbusdSwitch,
+    HwcAwayModeSwitch,
+    HwcBoostSwitch,
+    _is_holiday_active,
+)
 from vaillant_ebus.water_heater import EbusdWaterHeater  # noqa: E402
 
 
@@ -524,3 +530,30 @@ def test_tank_present_on_off() -> None:
 
     c.data["ebusd"]["basv.HwcStorageTemp.value"] = "(empty for 3115b52406020001000500 / 0800010500ffffff7f)"
     assert EbusdTankPresentSensor(c, _entry()).is_on is False
+
+
+# Intent: an explicit unset DHW holiday start date means away mode is off even when the end register is unreadable.
+# Why: issue #152 - the BASS3 answers `ERR` for HwcHolidayEndPeriod, so the switch stayed Unknown instead of off.
+def test_hwc_away_switch_is_off_when_start_is_unset_and_end_is_missing() -> None:
+    c = _coordinator(dhw_boost_desired=False, sfmode="auto")
+    c.heating_circuit = "bass"
+    c.data["ebusd"] = {"bass.HwcHolidayStartPeriod.value": "01.01.2019"}
+
+    assert HwcAwayModeSwitch(c, _entry()).is_on is False
+
+    # Genuinely missing data stays unknown.
+    c.data["ebusd"] = {}
+    assert HwcAwayModeSwitch(c, _entry()).is_on is None
+
+
+# Intent: the zone away switch is off when the holiday start is unset and the end register is unreadable.
+# Why: issue #152 - same shape as the DHW switch; reverting the zone change must fail a test.
+def test_zone_away_switch_is_off_when_start_is_unset_and_end_is_missing() -> None:
+    c = _coordinator(dhw_boost_desired=False, sfmode="auto")
+    c.heating_circuit = "bass"
+    c.data["ebusd"] = {"bass.Z1HolidayStartPeriod.value": "01.01.2019"}
+
+    assert AwayModeSwitch(c, _entry(), "z1").is_on is False
+
+    c.data["ebusd"] = {}
+    assert AwayModeSwitch(c, _entry(), "z1").is_on is None
