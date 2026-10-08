@@ -69,6 +69,15 @@ def parse_args() -> argparse.Namespace:
 
 # Intent: orchestrate zip build, remote backup, replacement and optional restart.
 # Why: a single entry point keeps the deploy repeatable and the rollback path obvious.
+# Intent: write the host key accepted with --accept-new-host-key to the user's known_hosts file.
+# Why: AutoAddPolicy trusts the key for this run only; without saving it the next run asks again and fails.
+def persist_accepted_host_key(client) -> Path:
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    client.save_host_keys(str(known_hosts))
+    return known_hosts
+
+
 def main() -> int:
     args = parse_args()
     env = load_env(REPO_ROOT / ".env")
@@ -94,6 +103,8 @@ def main() -> int:
         allow_agent=False,
         timeout=20,
     )
+    if args.accept_new_host_key:
+        persist_accepted_host_key(client)
     try:
         status, output = run_remote(client, "test -d /config/custom_components && command -v python3 && command -v tar")
         if status != 0:
