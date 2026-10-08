@@ -6506,8 +6506,9 @@ async def test_runtime_defined_register_recovers_value_through_poll() -> None:
         ["scan.08 = Vaillant;HMU00;0904;5103", "scan.15 = Vaillant;BASS3;0708;4304"],
         ["scan.08 = Vaillant;BAI00;0503;9602", "scan.10 = Vaillant;HMU00;0904;5103"],
         ["bass YieldTotal = 0"],
+        ["scan.08 = Vaillant;BAI00;0503;9602", "scan.10 = "],
     ],
-    ids=["hmu-scan-without-boiler", "boiler-and-hmu-scan", "no-scan-at-all"],
+    ids=["hmu-scan-without-boiler", "boiler-and-hmu-scan", "no-scan-at-all", "blank-heat-pump-scan-row"],
 )
 def test_cache_only_heat_pump_energy_rows_survive_without_boiler_only_proof(lines: list[str]) -> None:
     graph = DISCOVERY.DiscoveryService.build_device_graph(lines)

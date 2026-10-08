@@ -1630,7 +1630,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc1RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC1)",
-        unit="°C",
     ),
     "ctlv2.Hc1Status": RegisterMeta(
         friendly_name="Status (HC1)",
@@ -1758,7 +1757,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc2RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC2)",
-        unit="°C",
     ),
     "ctlv2.Hc2MixerMovement": RegisterMeta(
         friendly_name="Mixer Movement (HC2)",
@@ -1867,7 +1865,6 @@ REGISTER_MAP: dict[str, RegisterMeta] = {
     ),
     "ctlv2.Hc3RoomTempSwitchOn": RegisterMeta(
         friendly_name="Room Temp Threshold (HC3)",
-        unit="°C",
     ),
     "ctlv2.Hc3MixerMovement": RegisterMeta(
         friendly_name="Mixer Movement (HC3)",

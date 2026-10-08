@@ -281,11 +281,13 @@ def _is_heat_pump_only_cache_register(register_key: str, graph: DeviceGraph) -> 
         return False
     if graph.heat_pump_result().status != ResolutionStatus.MISSING:
         return False
-    # A heat pump that has not answered its scan yet (ebusd just restarted) must not look like a boiler-only bus:
-    # require a completed BAI boiler scan and no HMU/HMUX scan at all, as discovery does for the boiler-only alias.
+    # A heat pump whose scan row is still blank (ebusd just restarted) is unproven, so it must not look absent.
+    # Require a completed BAI boiler scan and no heat-pump scan row at all, complete or not.
+    if any(not identity.complete for identity in graph.scan_identities):
+        return False
     scan_types = [identity.scan_type.casefold() for identity in graph.scan_identities]
     has_boiler_scan = any(scan_type.startswith("bai") for scan_type in scan_types)
-    has_heat_pump_scan = any(scan_type.startswith("hmu") for scan_type in scan_types)
+    has_heat_pump_scan = any(scan_type.startswith(("hmu", "hmux")) for scan_type in scan_types)
     return has_boiler_scan and not has_heat_pump_scan
 
 
