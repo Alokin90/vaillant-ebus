@@ -150,7 +150,8 @@ class EbusdClimate(CoordinatorEntity[VaillantCoordinator], ClimateEntity):
         self._zn = zone.upper()
         self._attr_unique_id = f"{entry.entry_id}_climate_{zone}"
         self._attr_device_info = coordinator.get_device_info(zone)
-        self._attr_name = "Home" if zone == "z1" else f"Zone {zone[1:]}"
+        # The device is already called "Zone N", so a second "Zone N" would give zone_2_zone_2.
+        self._attr_name = "Home" if zone == "z1" else "Climate"
         self._optimistic_hvac_mode: HVACMode | None = None
         self._quick_veto_until: datetime | None = None
         # Optimistic target temperature shown until device data confirms it or
@@ -707,7 +708,7 @@ class EbusdFlowTempRange(CoordinatorEntity[VaillantCoordinator], ClimateEntity):
             self._attr_name = "Flow Temperature Range"
         else:
             self._attr_unique_id = f"{entry.entry_id}_climate_flow_temp_range_{zone}"
-            self._attr_name = f"Flow Temperature Range Zone {zone[1:]}"
+            self._attr_name = "Flow Temperature Range"
         self._attr_device_info = coordinator.get_device_info(zone)
 
     # Supports target temperature range (min/max flow temp)

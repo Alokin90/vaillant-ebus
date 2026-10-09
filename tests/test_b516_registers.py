@@ -2,48 +2,16 @@
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import struct
 import sys
 from datetime import datetime
-from pathlib import Path
 
-BACKEND_PATH = Path(__file__).parents[1] / "custom_components/vaillant_ebus/backend"
-COMPONENT_PATH = BACKEND_PATH.parent
+from tests import _component_loader  # noqa: F401 — loads the shared modules once
 
-for name in ("vaillant_ebus", "vaillant_ebus.backend"):
-    pkg = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(name, None))
-    pkg.__path__ = [str(COMPONENT_PATH)] if name == "vaillant_ebus" else [str(BACKEND_PATH)]
-    sys.modules[name] = pkg
-
-MODELS_SPEC = importlib.util.spec_from_file_location("vaillant_ebus.backend.models", BACKEND_PATH / "models.py")
-assert MODELS_SPEC and MODELS_SPEC.loader
-MODELS = importlib.util.module_from_spec(MODELS_SPEC)
-sys.modules["vaillant_ebus.backend.models"] = MODELS
-MODELS_SPEC.loader.exec_module(MODELS)
-
-MAPPING_SPEC = importlib.util.spec_from_file_location("vaillant_ebus.backend.mapping", BACKEND_PATH / "mapping.py")
-assert MAPPING_SPEC and MAPPING_SPEC.loader
-MAPPING = importlib.util.module_from_spec(MAPPING_SPEC)
-sys.modules["vaillant_ebus.backend.mapping"] = MAPPING
-MAPPING_SPEC.loader.exec_module(MAPPING)
-
-ENTITY_SPEC = importlib.util.spec_from_file_location(
-    "vaillant_ebus.backend.entity_factory", BACKEND_PATH / "entity_factory.py"
-)
-assert ENTITY_SPEC and ENTITY_SPEC.loader
-ENTITY = importlib.util.module_from_spec(ENTITY_SPEC)
-sys.modules["vaillant_ebus.backend.entity_factory"] = ENTITY
-ENTITY_SPEC.loader.exec_module(ENTITY)
-
-DISCOVERY_SPEC = importlib.util.spec_from_file_location(
-    "vaillant_ebus.backend.discovery_service", BACKEND_PATH / "discovery_service.py"
-)
-assert DISCOVERY_SPEC and DISCOVERY_SPEC.loader
-DISCOVERY = importlib.util.module_from_spec(DISCOVERY_SPEC)
-sys.modules["vaillant_ebus.backend.discovery_service"] = DISCOVERY
-DISCOVERY_SPEC.loader.exec_module(DISCOVERY)
+MODELS = sys.modules["vaillant_ebus.backend.models"]
+MAPPING = sys.modules["vaillant_ebus.backend.mapping"]
+ENTITY = sys.modules["vaillant_ebus.backend.entity_factory"]
+DISCOVERY = sys.modules["vaillant_ebus.backend.discovery_service"]
 
 b516_date_bytes = MAPPING.b516_date_bytes
 DiscoveryService = DISCOVERY.DiscoveryService
@@ -181,3 +149,29 @@ def test_b516_cooling_register_entities() -> None:
     assert by_key["hmu.LiveMonitorCurrentConsumedPower.value"].meta.device_class == "power"
     assert by_key["hmu.LiveMonitorCurrentConsumedPower.value"].meta.unit == "kW"
     assert by_key["hmu.RunDataCompressorSpeed.value"].meta.unit == "rps"
+
+
+# Intent: the six HMUX0 Hc/Hwc environmental-yield counters keep Wh, energy class and total_increasing.
+# Why: issues #161/#175 - the counters must be usable for long-term statistics and the Energy dashboard.
+def test_hmux0_env_yield_counters_are_total_increasing_energy_sensors() -> None:
+    names = (
+        "HcEnvYieldTotal",
+        "HcEnvYieldDay",
+        "HcEnvYieldMonth",
+        "HwcEnvYieldTotal",
+        "HwcEnvYieldDay",
+        "HwcEnvYieldMonth",
+    )
+    lines = ["scan.08 = Vaillant;HMUX0;0407;0504", *[f"hmux0 {name} = 44225" for name in names]]
+    entities = {
+        entity.key: entity for entity in EntityFactoryService().generate(DiscoveryService.build_device_graph(lines))
+    }
+
+    for name in names:
+        entity = entities[f"hmux0.{name}.value"]
+        assert (entity.meta.device_class, entity.meta.unit, entity.meta.state_class) == (
+            "energy",
+            "Wh",
+            "total_increasing",
+        )
+        assert entity.enabled_by_default is True

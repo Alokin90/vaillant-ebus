@@ -3,25 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
-from pathlib import Path
 
 import pytest
 
+# Load ebus_service module
+from tests import _component_loader  # noqa: F401 — loads the shared modules once
 from tests.fake_ebusd import FakeEbusdServer, load_discovery_dump, load_find_lines
 
-# Load ebus_service module
-EBUS_PATH = Path(__file__).parents[1] / "custom_components/vaillant_ebus/backend/ebus_service.py"
-for name in ("vaillant_ebus", "vaillant_ebus.backend"):
-    pkg = importlib.util.module_from_spec(importlib.machinery.ModuleSpec(name, None))
-    pkg.__path__ = [str(EBUS_PATH.parents[1])] if name == "vaillant_ebus" else [str(EBUS_PATH.parent)]
-    sys.modules[name] = pkg
-SPEC = importlib.util.spec_from_file_location("vaillant_ebus.backend.ebus_service", EBUS_PATH)
-assert SPEC and SPEC.loader
-EBUS = importlib.util.module_from_spec(SPEC)
-sys.modules["vaillant_ebus.backend.ebus_service"] = EBUS
-SPEC.loader.exec_module(EBUS)
+EBUS = sys.modules["vaillant_ebus.backend.ebus_service"]
 # Intent: fake-server integration tests use a short quiet interval for their single-burst replies.
 # Why: avoid waiting one second after each fake `find` while keeping the production timeout unchanged.
 EBUS.MULTILINE_RESPONSE_TIMEOUT = 0.01
@@ -59,6 +49,8 @@ async def test_arotherm_fixture_loads() -> None:
         ("community/geniaset_bass3_discovery.yaml", 50),
         ("community/flexotherm_133_cooling_discovery.yaml", 50),
         ("community/flexotherm_vwf1174_issue134_2026-09-15_162647.yaml", 50),
+        ("community/hmux0_issue171_2026-10-03_094933_discovery.yaml", 100),
+        ("community/hmu_e7000_discussion31_2026-10-04_113747_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_off_idle_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_off_heating_discovery.yaml", 50),
         ("community/arotherm_pro7_quiet_on_heating_discovery.yaml", 50),

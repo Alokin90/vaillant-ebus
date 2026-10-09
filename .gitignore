@@ -54,3 +54,6 @@ discovery_dumps/
 
 # Local planning artifacts
 docs/plan-*.md
+
+# Claude Code local state
+/.claude.json

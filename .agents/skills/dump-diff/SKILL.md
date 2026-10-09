@@ -1,3 +1,8 @@
+---
+name: dump-diff
+description: "Compare two local discovery dumps from Home Assistant to see which eBUS registers changed after an action (for example a thermostat setting or a feature toggle). Use for: what changed between two dumps. Not for: analysing a community dump (see community-dump-analysis) or loose ebusctl commands (see ebusd-expert)."
+---
+
 # Dump Diff Skill
 
 Compare two discovery dumps from HA to detect eBUS register changes after an action (e.g., changing thermostat settings, toggling features).

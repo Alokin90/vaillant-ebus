@@ -1,5 +1,116 @@
 # Changelog
 
+## 1.11.1 - 2026-10-07
+
+### Fixed
+
+- Remove the frozen energy sensors on a gas boiler with a BASS3 (issue #152). The integration kept old cached
+  `Stat*EnergySum*` values (electric, environment, solar) for the boiler interface and the controller, although the
+  bus does not list them and there is no heat pump to read them from. They showed 0 or odd values. When the bus has a
+  boiler scan and no heat-pump scan, these cached values are now dropped at start, and their entities are switched
+  off in the registry. Registers that the bus lists, and systems with a heat pump, are not touched.
+- Show the room temperature threshold (`Hc1/2/3RoomTempSwitchOn`) as text without a unit. It is an enum with the
+  values `off`, `modulating` and `thermostat`, but the sensor had a temperature unit, so it stayed `unknown`.
+- Stop the `prepare message part 0: ERR: end of input reached` errors on the bus (issue #182). The integration read
+  `Errorhistory` about every 40 seconds, but ebusd needs an `index` for that message, so every read failed and ebusd
+  logged a bus error. `Errorhistory` is no longer read. An "Error History" entity that never had a value is removed
+  with this change. Thanks to the reporter for the clear trace and the test.
+- The DHW away switch and the zone away switch show `off` when the holiday start date is the "not set" date, even if
+  the end date cannot be read. Before, they stayed `unknown`. Missing data still gives `unknown`.
+
+### Changed
+
+- The boiler status message temperatures are named "Flow Temperature (Status message)" and "Storage Temperature
+  (Status message)", so they are no longer confused with the separate flow and storage temperature sensors. Entity
+  ids of existing installations do not change. The storage variant is off by default.
+- The climate entity of extra zones is named "Climate" and the flow range "Flow Temperature Range". The zone device
+  already carries the zone name, which gave ids such as `climate.zone_2_zone_2` on new installations. Existing entity
+  ids do not change.
+- Fix the options of the HC1 setback mode select to `eco` and `normal` (pull request #174, thanks to Alokin90).
+
+### Not changed
+
+- Holiday date entities stay `unknown` while no holiday is set; Home Assistant date entities cannot show "not set".
+- Flow, return and outside temperature sensors that the boiler interface does not answer stay unavailable.
+- VR_70 values, cooling dates on a gas boiler and the broadcast outside temperature need more evidence first.
+
+## 1.11.0 - 2026-10-06
+
+### Fixed
+
+- Stop the repeated reloads of the integration on systems with a VWZIO SW0500. The hydraulic station power sensor
+  (`PowerConsumptionVwz`) was removed as stale at every start, switched on again a moment later by the fallback
+  read, and Home Assistant reloads the whole integration after each such change. Every entity then went unavailable
+  for a few seconds, sometimes every minute or two (issues #171 and #175). Registers that the integration defines
+  itself are no longer treated as stale, are no longer switched off while they have no value, and do not show an
+  old value from the previous session.
+- Keep the raw traffic of a discovery dump with a positive `grab_duration`. Two real dumps lost it because ebusd had
+  replaced the latest payload of a message between the two snapshots, and the dump then reported `skipped_active`.
+  The capture is now kept. Rows whose counts had to be estimated are listed under `grab_approximate_rows` in the
+  dump metadata. A counter that goes down (an ebusd restart) still discards the capture.
+- Stop the endless `ERR: invalid position` polling on a VRC350 (`35000`) system. On that bus the only circuit typed
+  as a controller is the BAI boiler interface, so the CTLV2 B524 definitions (`z1RoomHumidity`,
+  `ManualCoolingStartDate`, `ManualCoolingEndDate`) were defined on the boiler, which answers `00` to them, and
+  ebusd kept polling them (issue #179). B524 definitions are no longer defined on a BAI boiler interface; real
+  VRC700-family controllers are not affected. ebusd keeps runtime definitions until it restarts, so restart ebusd
+  once after updating to stop the polling that already runs. The one-off fallback reads of these registers are
+  skipped as well.
+
+### Not changed
+
+- The slow passive values on HMUX0 SW0407 (status code, compressor speed, building pump power and the compressor
+  counters) have no code change of their own. The gateway sends them about every five minutes, and every reload
+  wipes them, so the reload fix above is the expected cure. Please confirm on 1.11.0.
+- A discovery dump with a very long `grab_duration` (300 seconds) that produced no file at all. The cause is not
+  known yet; a Home Assistant log of the failing call would help.
+
+## 1.10.5 - 2026-10-04
+
+### Fixed
+
+- Keep the precise flow and return temperature (`RunDataFlowTemp`, `RunDataReturnTemp`) up to date on HMUX0
+  SW0406/HW0504 units. Since v1.10.3 the integration only asked ebusd for these values on SW0303, so on SW0406
+  they stayed at whatever ebusd had cached (issue #171). SW0303 and SW0406 are now read; other firmware versions
+  stay excluded because earlier captures returned impossible values.
+- Fix the ids of the passive HMUX0 SW0407 definitions. The ebusd id does not include the length byte, but the four
+  B509 definitions (status code, compressor speed, electrical power, building pump power) and the VWZIO backup-heater
+  counters started with it, so they could never match a telegram on the bus. This is why those entities stayed
+  `unknown` (issue #175, issue #161). A new test checks every passive id against the telegrams in the captures. The active B509 definitions for
+  SW0302/SW0303 (electrical power, compressor speed, building pump power) had the same problem and are fixed too;
+  they were unavailable before.
+- Keep entities for registers that the integration defines itself. After a restart ebusd can list them as "no data"
+  for a moment, and the integration then removed or disabled them, even when you had enabled them
+  (issue #175, environmental yield sensors).
+- Remove the `Invalid repairs platform` error at startup. The repairs module now offers the confirm step that Home
+  Assistant expects (issue #161).
+- Do not create entities for a heating circuit that the controller itself reports as `inactive`. The circuit type
+  sensor stays. A circuit whose type cannot be read is never hidden (issue #152, the unused HC3 on a BASS3).
+- Remove a stale cached zone register when the same register is live under another circuit, such as the second
+  room humidity sensor on a BASS3 system (issue #152).
+- The boiler stage-1 energy counters (`PrEnergySumHc1`, `PrEnergySumHwc1`) no longer claim kWh. Their values grow
+  far too fast for kWh, so the unit is unknown. They are now diagnostic raw counters and disabled by default
+  (issue #152). Existing entities keep their current setting.
+
+- Let the discovery dump read a longer `grab result all` response (limit raised from 10,000 to 100,000 lines). ebusd
+  2.1 and newer grabs all the time, so on a long-running system the result grew past the old limit and the dump fell
+  back to a register-only file (`grab_status: skipped_active`).
+
+### Added
+
+- Add the electrical power of the HMUX0 SW0407/HW0504 heat pump from the gateway's `B516/14` frame, plus the
+  heating and hot-water compressor runtime and start counters from `B511/1801` and `B511/1802`. The layouts match
+  upstream ebusd-configuration issues #490, #522, #610 and #638 and the captures in issue #161. These are read
+  passively and are disabled by default; when the gateway does not send the telegram they stay unavailable.
+- Add the backup-heater hot-water heat total (`B516` source `0x49`, usage `04`) for VWZIO SW0500/HW0504. This is a
+  strong assumption from the issue #161 capture: 6487 Wh against 106 minutes of heater runtime. The entity is
+  disabled by default and unavailable without data.
+
+### Notes
+
+- Not changed: Quiet mode (the `B508/0209` direction is not proven), the BASS3 calendars, the E7000 controller
+  without an ebusd configuration (discussion #31, upstream PR #623 in ebusd-configuration), and the default
+  enablement of rarely used registers.
+
 ## 1.10.4 - 2026-10-03
 
 ### Added

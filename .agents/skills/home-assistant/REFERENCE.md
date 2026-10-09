@@ -2,7 +2,7 @@
 
 ## ebusd TCP API
 
-### Connectie
+### Connection
 
 ```bash
 python3 -c "
@@ -16,19 +16,19 @@ s.close()
 "
 ```
 
-### Register naming: SPATIE, geen punt
+### Register naming: SPACE, not dot
 
-ebusd gebruikt `-c CIRCUIT NAME` (spatie). Puntnotatie `circuit.name` werkt NIET voor `read`.
+ebusd uses `-c CIRCUIT NAME` (space). Dot notation `circuit.name` does NOT work for `read`.
 
-| Syntax | Werkt? |
+| Syntax | Works? |
 |--------|--------|
 | `r -c hmu CurrentConsumedPower` | ✅ |
 | `r hmu.CurrentConsumedPower` | ❌ `ERR: element not found` |
-| `find -c hmu` | ✅ filter op circuit |
+| `find -c hmu` | ✅ filter on circuit |
 
 ### Multi-field registers
 
-`find -v -c hmu` toont veldnamen. Lezen specifiek veld: `r -c hmu Status01 temp`
+`find -v -c hmu` shows field names. Read a specific field: `r -c hmu Status01 temp`
 
 ### Define syntax
 
@@ -36,35 +36,35 @@ ebusd gebruikt `-c CIRCUIT NAME` (spatie). Puntnotatie `circuit.name` werkt NIET
 define -r "r,circuit,name,label,qq,zz,msg,field,fieldname,,type,divisor,unit,comment"
 ```
 
-- `r` = read type (of `r5` voor zone read)
+- `r` = read type (or `r5` for zone read)
 - `qq` = master address (31 = ebusd)
 - `zz` = slave address (08 = HMU, 15 = CTLV2)
 - `msg` = hex message ID (B516, B524)
-- `field` = field ID in de message
+- `field` = field ID in the message
 
 ### B516 message fields (HMU)
 
-Getest op HW 5103. Alleen fields 10-13 bestaan:
+Tested on HW 5103. Only fields 10-13 exist:
 
-| Field | Type | Waarde (HWC actief) | Betekenis |
+| Field | Type | Value (HWC active) | Meaning |
 |-------|------|---------------------|-----------|
-| 10 | UCH | 25-31 | Varieert |
+| 10 | UCH | 25-31 | Varies |
 | 11 | UCH | 2 | Constant |
 | 12 | UCH | 1 | Constant |
-| 13 | UIN/UCH | 800/32 | Varieert |
+| 13 | UIN/UCH | 800/32 | Varies |
 
-B516 heeft GEEN power consumption field. `PowerConsumptionHmu` met B516,14 is onmogelijk.
+B516 has NO power consumption field. `PowerConsumptionHmu` with B516,14 is impossible.
 
-### Logging ebusd verkeer
+### Logging ebusd traffic
 
-`grab` commando vangt bus verkeer:
+The `grab` command captures bus traffic:
 ```bash
 s.sendall(b"grab\n")  # start capture
 s.sendall(b"grab result\n")  # get captured data
 s.sendall(b"grab stop\n")  # stop capture
 ```
 
-`log` commando voor debug logging:
+The `log` command is for debug logging:
 ```bash
 s.sendall(b"log all debug\n")  # enable debug
 s.sendall(b"log all none\n")   # disable
@@ -72,16 +72,16 @@ s.sendall(b"log all none\n")   # disable
 
 ### Addon details
 
-| Eigenschap | Waarde |
+| Property | Value |
 |------------|--------|
 | Slug | `b4d7ad18_ebusd` |
-| Versie | 26.1.8 |
+| Version | 26.1.8 |
 | Ports | 8888 (TCP), 8889 (HTTP) |
-| Toegang | `--accesslevel=*` |
+| Access | `--accesslevel=*` |
 | Define | `--enabledefine` |
-| Device | `ens:192.168.1.131:9999` (eBUS adapter IP) |
-| CSV | `vaillant/08.hmu.HW5103.csv` voor HMU |
-| Protected | Ja (geen docker exec via host) |
+| Device | `ens:<adapter-ip>:9999` (eBUS adapter IP) |
+| CSV | `vaillant/08.hmu.HW5103.csv` for HMU |
+| Protected | Yes (no docker exec via host) |
 
 # Home Assistant Reference
 
@@ -91,7 +91,7 @@ s.sendall(b"log all none\n")   # disable
 TOKEN=$(echo "PASSWORD" | sudo -S cat /run/s6/container_environment/SUPERVISOR_TOKEN | tr -d '\n')
 ```
 
-**Token heeft trailing newline** — altijd `tr -d '\n'`.
+**The token has a trailing newline** — always `tr -d '\n'`.
 
 | Action | Method + Endpoint |
 |--------|------------------|
@@ -104,9 +104,9 @@ TOKEN=$(echo "PASSWORD" | sudo -S cat /run/s6/container_environment/SUPERVISOR_T
 | Reload config entry | `POST .../config_entries/entry/<entry_id>/reload` |
 | Supervisor ping | `GET http://supervisor/supervisor/ping` |
 
-**`POST http://supervisor/core/start` werkt NIET als HA down is** — core proxy offline. Gebruik `/homeassistant/start`.
+**`POST http://supervisor/core/start` does NOT work when HA is down** — core proxy is offline. Use `/homeassistant/start`.
 
-Supervisor hostname resolutie faalt soms na restart. Workarounds:
+Supervisor hostname resolution sometimes fails after a restart. Workarounds:
 ```bash
 curl -s --resolve supervisor:80:172.30.32.2 http://supervisor/... -H "Authorization: Bearer $TOKEN"
 curl -s http://172.30.32.2/... -H "Authorization: Bearer $TOKEN"
@@ -118,11 +118,11 @@ curl -s http://172.30.32.2/... -H "Authorization: Bearer $TOKEN"
 sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" 'cmd'
 ```
 
-**sudo**: `echo "PASSWORD" | sudo -S <cmd>` (pipe, niet heredoc).
+**sudo**: `echo "PASSWORD" | sudo -S <cmd>` (pipe, not heredoc).
 
 Write files: `echo "PASS" | sudo -S tee /path/to/file > /dev/null << 'EOF'`
 
-Python via base64 (veilige quoting):
+Python via base64 (safe quoting):
 ```bash
 cat > /tmp/script.py << 'PYEOF'
 ... python code ...
@@ -134,9 +134,9 @@ sshpass -p "$PASS" ssh user@host \
 
 ## Config Entry State
 
-Bestand: `/config/.storage/core.config_entries` (key: `data.entries[]`)
+File: `/config/.storage/core.config_entries` (key: `data.entries[]`)
 
-In HA 2026.7+ wordt `state` NIET meer naar JSON geschreven. `state: None` is NORMAL. Check via states API of entities geladen zijn:
+In HA 2026.7+ `state` is NO longer written to JSON. `state: None` is NORMAL. Check via the states API whether entities are loaded:
 ```bash
 curl -s http://supervisor/core/api/states -H "Authorization: Bearer $TOKEN" \
   | python3 -c "import sys,json; s=json.load(sys.stdin); print(sum(1 for x in s if 'vaillant' in x['entity_id'].lower()))"
@@ -144,7 +144,7 @@ curl -s http://supervisor/core/api/states -H "Authorization: Bearer $TOKEN" \
 
 ## Device Registry
 
-Bestand: `/config/.storage/core.device_registry` (key: `data.devices[]`)
+File: `/config/.storage/core.device_registry` (key: `data.devices[]`)
 
 Remove by identifier:
 ```python
@@ -164,7 +164,7 @@ d['data']['devices'] = [e for e in d['data']['devices'] if not any(
 | Area registry | `/config/.storage/core.area_registry` |
 | Automations | `/config/automations.yaml` |
 | Scripts | `/config/scripts.yaml` |
-| Dashboards | `/config/.storage/lovelace.*` of `/config/dashboards/` |
+| Dashboards | `/config/.storage/lovelace.*` or `/config/dashboards/` |
 | Custom integrations | `/config/custom_components/` |
 | Custom themes | `/config/themes/` |
 
@@ -181,9 +181,9 @@ Broker: Docker `core-mosquitto`, port 1883. Credentials in `/config/.storage/cor
 
 ### Sensor non-numeric value + unit
 
-HA valideert: als `native_unit_of_measurement` gezet is, moet `native_value` numeric zijn. `"modulating"` met `°C` → ValueError.
+HA validates: if `native_unit_of_measurement` is set, `native_value` must be numeric. `"modulating"` with `°C` → ValueError.
 
-Fix: return `None` i.p.v. string wanneer unit gezet is:
+Fix: return `None` instead of a string when a unit is set:
 ```python
 @property
 def native_value(self) -> float | str | None:
@@ -198,16 +198,16 @@ def native_value(self) -> float | str | None:
         return str(raw)
 ```
 
-Gebruik `getattr` — niet alle entities zetten het attribute.
+Use `getattr` — not all entities set the attribute.
 
 ### Coordinator ConfigEntryNotReady loop
 
-`async_start()` die raise't op connect failure → HA retries oneindig. Fix: catch, log, return graceful. Poll loop reconnect zelf.
+`async_start()` that raises on connect failure → HA retries indefinitely. Fix: catch, log, return gracefully. The poll loop reconnects itself.
 
-### AttributeError voor optional attrs
+### AttributeError for optional attrs
 
-Attributes zoals `_attr_native_unit_of_measurement` conditioneel gezet in `__init__` → gebruik `getattr` in andere methods.
+Attributes such as `_attr_native_unit_of_measurement` that are set conditionally in `__init__` → use `getattr` in other methods.
 
 ### Bytecode cache
 
-Altijd `__pycache__/` verwijderen bij deploy. Python vergelijkt `.pyc` mtime met `.py` — oude bytecode kan blijven hangen.
+Always remove `__pycache__/` on deploy. Python compares `.pyc` mtime with `.py` — old bytecode can stick around.

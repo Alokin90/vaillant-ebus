@@ -28,7 +28,7 @@ from .backend.mapping import (
     VWZIO_SW0500_FALLBACK_NAMES,
     hmux0_candidate_circuits,
     hmux0_fallback_blocked_circuits,
-    hmux0_sw0303_owner,
+    hmux0_precise_temperature_owner,
     is_field_key,
     vwz_station_scan_76_circuit,
     vwzio_sw0500_circuit,
@@ -39,12 +39,14 @@ from .coordinator import VaillantCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 GRAB_CONNECT_TIMEOUT = 5
-GRAB_MAX_RESPONSE_LINES = 10_000
+# ebusd 2.1+ grabs daemon-wide, so `grab result all` grows with uptime; 10_000 lines was exceeded after a day.
+GRAB_MAX_RESPONSE_LINES = 100_000
 GRAB_RESPONSE_TIMEOUT = 30
 GRAB_COUNT_DELTA_LIMITATION = (
     "results keep the latest payload per key; identical visible rows are coalesced by summed counts; "
     "ebusd exposes no grab epoch, so a stop/restart followed by count refill during this interval cannot be detected; "
-    "external grab commands or daemon restarts must not run during export"
+    "external grab commands or daemon restarts must not run during export; rows listed under "
+    "grab_approximate_rows had their payload replaced, so their counts split the family's growth and are estimates"
 )
 _GRAB_SESSION_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Lock]] = (
     WeakKeyDictionary()
@@ -76,6 +78,7 @@ class GrabCaptureResult:
     lines: tuple[str, ...]
     status: Literal["captured", "continued"]
     duration: float
+    approximate_rows: tuple[str, ...] = ()
 
 
 # Intent: resolve hostnames to the socket addresses used for dump-lock identity.
@@ -146,9 +149,9 @@ def _fallback_read_skip_keys(graph: DeviceGraph | None, runtime_definitions: lis
 
     for hmux0 in hmux0_fallback_blocked_circuits(graph):
         skipped.update((hmux0.casefold(), name) for name in HMUX0_SW0407_FALLBACK_NAMES)
-    hmux0_sw0303 = hmux0_sw0303_owner(graph)
+    hmux0_precise = hmux0_precise_temperature_owner(graph)
     for circuit in hmux0_candidate_circuits(graph):
-        if hmux0_sw0303 is None or circuit.casefold() != hmux0_sw0303.casefold():
+        if hmux0_precise is None or circuit.casefold() != hmux0_precise.casefold():
             skipped.update((circuit.casefold(), name) for name in HMUX0_PRECISE_TEMPERATURE_REGISTERS)
     vwzio = vwzio_sw0500_circuit(graph)
     if vwzio is not None:
@@ -491,15 +494,53 @@ def _coalesce_grab_result_entries(entries: list[GrabResultEntry]) -> list[GrabRe
     return list(by_key.values())
 
 
+# Intent: attribute a family's count growth when ebusd replaced some rows' latest payload.
+# Why: ebusd keeps one latest payload per key, so a changed payload makes the baseline row vanish; the family's
+# summed counts still show how many telegrams arrived, and discarding the whole capture lost the payload evidence.
+# Returns the per-key deltas and whether any baseline row vanished (then the split is an estimate, not exact).
+def _ambiguous_family_deltas(
+    baseline_entries: list[GrabResultEntry],
+    final_entries: list[GrabResultEntry],
+) -> tuple[dict[str, int], bool]:
+    baseline_by_key = {entry.key: entry for entry in baseline_entries}
+    final_keys = {entry.key for entry in final_entries}
+    deltas: dict[str, int] = {}
+    for entry in final_entries:
+        previous = baseline_by_key.get(entry.key)
+        if previous is None:
+            continue
+        if entry.count < previous.count:
+            raise GrabIntervalUnavailableError("ebusd grab counter decreased during capture")
+        deltas[entry.key] = entry.count - previous.count
+    new_entries = [entry for entry in final_entries if entry.key not in baseline_by_key]
+    if all(key in final_keys for key in baseline_by_key):
+        # Nothing vanished: a brand-new row happened entirely inside the interval, so its count is exact.
+        deltas.update({entry.key: entry.count for entry in new_entries})
+        return deltas, False
+    remainder = sum(entry.count for entry in final_entries) - sum(entry.count for entry in baseline_entries)
+    remainder -= sum(deltas.values())
+    if remainder < 0 or (remainder > 0 and not new_entries):
+        raise GrabIntervalUnavailableError("ebusd grab row changed in a multi-row message family")
+    # The split over several replacement rows is a guess: every row keeps at least one observation, no row exceeds its
+    # own cumulative count, and the family total may therefore differ slightly from ebusd's real growth.
+    share, extra = divmod(remainder, len(new_entries)) if new_entries else (0, 0)
+    for index, entry in enumerate(sorted(new_entries, key=lambda row: row.count, reverse=True)):
+        # Every replacement row keeps at least one observation so its payload stays in the dump; the family is flagged.
+        guess = max(1, share + (1 if index < extra else 0)) if remainder else 0
+        deltas[entry.key] = min(entry.count, guess)
+    return deltas, True
+
+
 # Intent: derive only messages observed between two snapshots of a continued grab.
 # Why: ebusd keeps one latest payload and cumulative count per global message key.
+# `approximate_rows` collects the emitted `request / response` payloads whose counts are attributed, not exact.
 def _grab_result_delta(
     baseline: list[GrabResultEntry],
     final: list[GrabResultEntry],
+    approximate_rows: list[str] | None = None,
 ) -> list[str]:
     baseline = _coalesce_grab_result_entries(baseline)
     final = _coalesce_grab_result_entries(final)
-    final_by_key = {entry.key: entry for entry in final}
     baseline_families: dict[str, list[GrabResultEntry]] = {}
     final_families: dict[str, list[GrabResultEntry]] = {}
     for entry in baseline:
@@ -507,38 +548,41 @@ def _grab_result_delta(
     for entry in final:
         final_families.setdefault(entry.family, []).append(entry)
 
-    previous_counts: dict[str, int] = {}
+    deltas: dict[str, int] = {}
+    replaced_families: set[str] = set()
+    baseline_keys = {entry.key for entry in baseline}
     for family, baseline_entries in baseline_families.items():
         if family not in final_families:
             raise GrabIntervalUnavailableError("ebusd grab baseline message family disappeared during capture")
         final_entries = final_families[family]
-        if len(baseline_entries) == 1 and len(final_entries) == 1:
+        same_single_row = (
+            len(baseline_entries) == 1
+            and len(final_entries) == 1
+            and baseline_entries[0].request[0] == final_entries[0].request[0]
+        )
+        if same_single_row:
             previous, current = baseline_entries[0], final_entries[0]
-            if previous.request[0] != current.request[0]:
-                raise GrabIntervalUnavailableError("ebusd grab source address changed during capture")
-            previous_counts[current.key] = previous.count
+            if current.count < previous.count:
+                raise GrabIntervalUnavailableError("ebusd grab counter decreased during capture")
+            deltas[current.key] = current.count - previous.count
             continue
-        final_keys = {entry.key for entry in final_entries}
-        for previous in baseline_entries:
-            if previous.key not in final_keys:
-                raise GrabIntervalUnavailableError("ebusd grab row changed in a multi-row message family")
-            current = final_by_key[previous.key]
-            if previous.request[0] != current.request[0]:
-                raise GrabIntervalUnavailableError("ebusd grab source address changed during capture")
-            previous_counts[previous.key] = previous.count
+        family_deltas, replaced = _ambiguous_family_deltas(baseline_entries, final_entries)
+        deltas.update(family_deltas)
+        if replaced:
+            replaced_families.add(family)
 
     delta_lines: list[str] = []
-    for key, entry in final_by_key.items():
-        previous_count = previous_counts.get(key, 0)
-        if entry.count < previous_count:
-            raise GrabIntervalUnavailableError("ebusd grab counter decreased during capture")
-        delta_count = entry.count - previous_count
+    for entry in final:
+        delta_count = deltas.get(entry.key, entry.count if entry.family not in baseline_families else 0)
         if delta_count == 0:
             continue
         payload, _, summary = entry.line.partition(" = ")
         _, label_separator, label = summary.partition(": ")
         suffix = f": {label}" if label_separator else ""
         delta_lines.append(f"{payload} = {delta_count}{suffix}")
+        # Only rows new to the final snapshot carry an estimated count; rows that kept their key are exact.
+        if entry.family in replaced_families and entry.key not in baseline_keys and approximate_rows is not None:
+            approximate_rows.append(payload)
     return delta_lines
 
 
@@ -556,6 +600,7 @@ async def async_grab(
     capture_status: Literal["captured", "continued"] = "captured"
     captured_duration = 0.0
     capture_started_at: float | None = None
+    approximate_rows: list[str] = []
 
     # Intent: record an exporter-started grab as soon as ebusd sends its start ACK.
     # Why: the shared protocol has no session ID, so the operator must not mutate grab state during export.
@@ -616,7 +661,7 @@ async def async_grab(
         except HomeAssistantError as exc:
             raise GrabIntervalUnavailableError(f"ebusd grab final snapshot was unusable: {exc}") from exc
         if capture_status == "continued":
-            lines.extend(_grab_result_delta(baseline_entries, result_entries))
+            lines.extend(_grab_result_delta(baseline_entries, result_entries, approximate_rows))
         else:
             lines.extend(entry.line for entry in result_entries)
     except GrabIntervalUnavailableError as exc:
@@ -653,7 +698,7 @@ async def async_grab(
                 unavailable.capture_method = "owned_session"
                 raise unavailable from exc
 
-    return GrabCaptureResult(tuple(lines), capture_status, captured_duration)
+    return GrabCaptureResult(tuple(lines), capture_status, captured_duration, tuple(approximate_rows))
 
 
 # Intent: track dump exports so config-entry unload can cancel them.
@@ -740,6 +785,7 @@ async def _async_export_discovery_dump_impl(
     grab_capture_method = "none"
     grab_error: str | None = None
     grab_capture_limitation: str | None = None
+    grab_approximate_rows: tuple[str, ...] = ()
     if grab_duration > 0:
         _LOGGER.info("Capturing raw eBUS traffic for %d seconds...", grab_duration)
         try:
@@ -750,6 +796,7 @@ async def _async_export_discovery_dump_impl(
             grab_status = capture.status
             grab_captured_duration = capture.duration
             grab_capture_method = "owned_session" if capture.status == "captured" else "count_delta"
+            grab_approximate_rows = capture.approximate_rows
             if capture.status == "continued":
                 grab_capture_limitation = GRAB_COUNT_DELTA_LIMITATION
             _LOGGER.info("Captured %d raw lines", len(grab_lines))
@@ -813,6 +860,10 @@ async def _async_export_discovery_dump_impl(
         dump_data["metadata"]["grab_capture_limitation"] = grab_capture_limitation
     if grab_error is not None:
         dump_data["metadata"]["grab_error"] = grab_error
+    if grab_approximate_rows:
+        # Intent: tell readers which rows carry attributed rather than exact interval counts.
+        # Why: ebusd replaces a row's latest payload, so the split of the family delta is an estimate.
+        dump_data["metadata"]["grab_approximate_rows"] = list(grab_approximate_rows)
     parsed_telegrams = None
     if grab_lines:
         dump_data["grab"] = grab_lines

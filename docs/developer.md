@@ -4,17 +4,42 @@
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-pip install ruff pytest
+source .venv/bin/activate          # Windows (Git Bash): source .venv/Scripts/activate
+pip install ruff==0.16.4 mypy==1.15.0 pytest pytest-asyncio pyyaml voluptuous types-cryptography
+pip install paramiko               # only for tools/deploy_ha.py
 ```
 
 ## Validation commands
 
+One command runs everything CI runs (ruff, scoped format check, `mypy --strict`, version, translation rules, YAML,
+compileall, `git diff --check`, pytest):
+
+```bash
+python tools/validate.py            # add --quick to skip pytest, or -k <expression> to narrow the tests
+```
+
+The individual commands are:
+
 ```bash
 .venv/bin/ruff check .
 .venv/bin/pytest -q
+python3 tools/version.py check
+python3 tools/check_translations.py
 python3 -m compileall custom_components/vaillant_ebus/
 ```
+
+On Windows a few tests fail for environment reasons only; `tools/known_env_failures.txt` lists them with the reason.
+
+## Helper tools
+
+| Tool | Purpose |
+| --- | --- |
+| `tools/validate.py` | CI parity in one command, with a Windows known-failure baseline |
+| `tools/check_translations.py` | Home Assistant translation rules that hassfest enforces |
+| `tools/fetch_attachments.py` | Download issue or discussion attachments to a scratch directory |
+| `tools/gh_reply.py` | Post an approved Markdown reply to an issue or discussion |
+| `tools/deploy_ha.sh` | Validate and deploy to a Home Assistant host over SSH (credentials from `.env`) |
+| `tools/search_upstream.sh` | Search `john30/ebusd-configuration` issues and pull requests |
 
 ## Architecture
 
